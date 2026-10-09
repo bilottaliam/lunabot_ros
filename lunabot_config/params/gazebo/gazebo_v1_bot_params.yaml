@@ -6,7 +6,7 @@ controller_manager:
       type: diff_drive_controller/DiffDriveController
     
     camera_controller:
-      type: position_controllers/JointGroupPositionController
+      type: forward_command_controller/ForwardCommandController
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
@@ -15,7 +15,7 @@ camera_controller:
   ros__parameters:
     joints:
       - camera_fisheye_yaw_joint
-    open_loop_control: true
+    interface_name: position
 
 diff_drive_controller:
   ros__parameters:

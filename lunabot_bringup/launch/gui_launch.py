@@ -105,27 +105,27 @@ def create_sim_group(context, *args, **kwargs):
         parameters=[{"use_sim_time": True}],
     )
 
+    # Controller parameters go to each spawner; gz_ros2_control no longer hands them to controllers
+    controller_params = os.path.join(
+        get_package_share_directory("lunabot_config"), "params", "gazebo",
+        f"gazebo_{context.launch_configurations.get('robot_type')}_params.yaml",
+    )
+
     topic_remapper_node = Node(
         package="lunabot_util",
         executable="topic_remapper",
     )
 
-    joint_state_broadcaster_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
-    )
+    # One spawner activates every controller in a single switch; separate spawners time out
+    # against each other when the sim runs slower than real time
+    controllers = ["joint_state_broadcaster", "diff_drive_controller", "camera_controller"]
+    if context.launch_configurations.get("robot_type") == "v2_bot":
+        controllers.append("position_controller")
 
-    diff_drive_controller_spawner = Node(
+    controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["diff_drive_controller", "--controller-manager", "/controller_manager"],
-    )
-
-    camera_controller_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["camera_controller", "--controller-manager", "/controller_manager"],
+        arguments=controllers + ["--controller-manager", "/controller_manager", "--param-file", controller_params],
     )
 
     actions_launch = IncludeLaunchDescription(
@@ -143,18 +143,9 @@ def create_sim_group(context, *args, **kwargs):
         bridge_node,
         pointcloud_to_livox_node,
         topic_remapper_node,
-        joint_state_broadcaster_spawner,
-        diff_drive_controller_spawner,
-        camera_controller_spawner,
+        controller_spawner,
         actions_launch,
     ]
-
-    if context.launch_configurations.get("robot_type") == "v2_bot":
-        actions.append(Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["position_controller", "--controller-manager", "/controller_manager"],
-        ))
 
     return actions
 

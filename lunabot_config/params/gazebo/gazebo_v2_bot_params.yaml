@@ -3,10 +3,10 @@ controller_manager:
     update_rate: 100
 
     position_controller:
-      type: position_controllers/JointGroupPositionController
+      type: forward_command_controller/ForwardCommandController
     
     camera_controller:
-      type: position_controllers/JointGroupPositionController
+      type: forward_command_controller/ForwardCommandController
 
     diff_drive_controller:
       type: diff_drive_controller/DiffDriveController
@@ -18,13 +18,13 @@ position_controller:
   ros__parameters:
     joints:
       - base_bucket_joint
-    open_loop_control: true
+    interface_name: position
 
 camera_controller:
   ros__parameters:
     joints:
       - camera_fisheye_yaw_joint
-    open_loop_control: true
+    interface_name: position
 
 diff_drive_controller:
   ros__parameters:

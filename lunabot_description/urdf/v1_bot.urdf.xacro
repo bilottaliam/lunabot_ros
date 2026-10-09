@@ -336,63 +336,35 @@
     </gazebo>
 
     <gazebo reference="front_right_wheel_link">
-      <mu>1.0</mu>
+      <!-- URDF <gazebo> extension tags; ODE slip1/slip2 has no gz-sim equivalent -->
+      <mu1>1.0</mu1>
       <mu2>1.0</mu2>
-      <surface>
-        <contact>
-          <ode>
-            <kp>1000000</kp>
-            <kd>500</kd>
-            <slip1>0.015</slip1>
-            <slip2>0.015</slip2>
-          </ode>
-        </contact>
-      </surface>
+      <kp>1000000</kp>
+      <kd>500</kd>
     </gazebo>
 
     <gazebo reference="front_left_wheel_link">
-      <mu>1.0</mu>
+      <!-- URDF <gazebo> extension tags; ODE slip1/slip2 has no gz-sim equivalent -->
+      <mu1>1.0</mu1>
       <mu2>1.0</mu2>
-      <surface>
-        <contact>
-          <ode>
-            <kp>1000000</kp>
-            <kd>500</kd>
-            <slip1>0.015</slip1>
-            <slip2>0.015</slip2>
-          </ode>
-        </contact>
-      </surface>
+      <kp>1000000</kp>
+      <kd>500</kd>
     </gazebo>
 
     <gazebo reference="rear_right_wheel_link">
-      <mu>1.0</mu>
+      <!-- URDF <gazebo> extension tags; ODE slip1/slip2 has no gz-sim equivalent -->
+      <mu1>1.0</mu1>
       <mu2>1.0</mu2>
-      <surface>
-        <contact>
-          <ode>
-            <kp>1000000</kp>
-            <kd>500</kd>
-            <slip1>0.015</slip1>
-            <slip2>0.015</slip2>
-          </ode>
-        </contact>
-      </surface>
+      <kp>1000000</kp>
+      <kd>500</kd>
     </gazebo>
 
     <gazebo reference="rear_left_wheel_link">
-      <mu>1.0</mu>
+      <!-- URDF <gazebo> extension tags; ODE slip1/slip2 has no gz-sim equivalent -->
+      <mu1>1.0</mu1>
       <mu2>1.0</mu2>
-      <surface>
-        <contact>
-          <ode>
-            <kp>1000000</kp>
-            <kd>500</kd>
-            <slip1>0.015</slip1>
-            <slip2>0.015</slip2>
-          </ode>
-        </contact>
-      </surface>
+      <kp>1000000</kp>
+      <kd>500</kd>
     </gazebo>
 
     <gazebo reference="camera_front_link">
@@ -557,32 +529,36 @@
       </hardware>
       <joint name="base_front_right_wheel_joint">
         <command_interface name="velocity">
-          <param name="min">-1</param>
-          <param name="max">1</param>
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <param name="min">-10</param>
+          <param name="max">10</param>
         </command_interface>
         <state_interface name="position" />
         <state_interface name="velocity" />
       </joint>
       <joint name="base_front_left_wheel_joint">
         <command_interface name="velocity">
-          <param name="min">-1</param>
-          <param name="max">1</param>
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <param name="min">-10</param>
+          <param name="max">10</param>
         </command_interface>
         <state_interface name="position" />
         <state_interface name="velocity" />
       </joint>
       <joint name="base_rear_right_wheel_joint">
         <command_interface name="velocity">
-          <param name="min">-1</param>
-          <param name="max">1</param>
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <param name="min">-10</param>
+          <param name="max">10</param>
         </command_interface>
         <state_interface name="position" />
         <state_interface name="velocity" />
       </joint>
       <joint name="base_rear_left_wheel_joint">
         <command_interface name="velocity">
-          <param name="min">-1</param>
-          <param name="max">1</param>
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <param name="min">-10</param>
+          <param name="max">10</param>
         </command_interface>
         <state_interface name="position" />
         <state_interface name="velocity" />
