@@ -52,8 +52,9 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
     `camera_controller` are now `forward_command_controller/ForwardCommandController` with `interface_name: position`.
     The `~/commands` topic and message type are unchanged, so the GUI needs no change.
   - Controllers no longer inherit the params file given to `gz_ros2_control`, so the spawner passes it with `--param-file`.
-  - A single spawner now activates all controllers. Four parallel spawners hit "Switch controller timed out" when the sim
-    runs slower than real time.
+  - A single spawner now activates all controllers, with 120 s switch and service timeouts. Switches only complete inside a
+    sim step, so with the Gazebo GUI open on a slow machine (about 7% real-time factor on the test laptop) the default 5 s timeout
+    failed and left the robot with no drive controller.
   - Removed `use_stamped_vel` (no longer a diff_drive parameter).
 - **`lunabot_gui`** now declares `python3-pyqt5` / `python3-opencv`, which were only installed by hand before.
 

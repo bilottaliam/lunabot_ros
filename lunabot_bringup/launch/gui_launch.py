@@ -118,8 +118,8 @@ def create_sim_group(context, *args, **kwargs):
         parameters=[{"use_sim_time": True}],
     )
 
-    # One spawner activates every controller in a single switch; separate spawners time out
-    # against each other when the sim runs slower than real time
+    # One spawner activates every controller in a single switch. Switches only complete inside a
+    # sim step, so allow long timeouts for machines that run the sim far below real time.
     controllers = ["joint_state_broadcaster", "diff_drive_controller", "camera_controller"]
     if context.launch_configurations.get("robot_type") == "v2_bot":
         controllers.append("position_controller")
@@ -127,7 +127,13 @@ def create_sim_group(context, *args, **kwargs):
     controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=controllers + ["--controller-manager", "/controller_manager", "--param-file", controller_params],
+        arguments=controllers + [
+            "--controller-manager", "/controller_manager",
+            "--param-file", controller_params,
+            "--switch-timeout", "120",
+            "--service-call-timeout", "120",
+            "--controller-manager-timeout", "120",
+        ],
     )
 
     actions_launch = IncludeLaunchDescription(
