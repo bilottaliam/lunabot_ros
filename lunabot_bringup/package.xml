@@ -19,8 +19,9 @@
   <depend>foxglove_bridge</depend>
   <depend>ros2_control</depend>
   <depend>ros2_controllers</depend>
-  <depend>gazebo_ros_pkgs</depend>
-  <depend>gazebo_ros2_control</depend>
+  <depend>ros_gz_sim</depend>
+  <depend>ros_gz_bridge</depend>
+  <depend>gz_ros2_control</depend>
   <depend>xacro</depend>
   <depend>lunabot_msgs</depend>
   <depend>lunabot_config</depend>

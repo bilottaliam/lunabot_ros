@@ -7,12 +7,12 @@ This directory contains third-party ROS2 packages integrated directly into the r
 ### livox_ros_driver2
 - **Description**: ROS2 driver for Livox LiDAR sensors
 - **Original source**: https://github.com/Livox-SDK/livox_ros_driver2
-- **Notes**: Modified for ROS2 Humble (stripped ROS1 support, uses `launch/` directory)
+- **Notes**: Modified for ROS 2 (stripped ROS1 support, uses `launch/` directory)
 
-### livox_laser_simulation_RO2
-- **Description**: Gazebo Classic simulation plugin for Livox LiDAR sensors
-- **Original source**: https://github.com/Livox-SDK/livox_laser_simulation
-- **Notes**: Modified for CustomMsg and PointCloud2 publishing
+### livox_laser_simulation_RO2 (removed)
+- Gazebo Classic only plugin, which does not exist for Gazebo Jetty. Simulation now uses a gz-sim
+  `gpu_lidar` sensor plus `lunabot_util/pointcloud_to_livox`, which republishes it as the Livox
+  CustomMsg on `/livox/lidar`. See MIGRATION.md.
 
 ### Point-LIO
 - **Description**: Point-LIO LiDAR-inertial odometry, publishes to `/lio_odom`

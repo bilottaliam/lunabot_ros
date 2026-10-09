@@ -60,30 +60,49 @@ def create_sim_group(context, *args, **kwargs):
     if context.launch_configurations.get("use_sim") != "true":
         return []
 
+    # -s runs the server only; sensors still render offscreen
+    gui = context.launch_configurations.get("sim_gui") == "true"
+    world_file = context.launch_configurations.get("world_file")
+    gz_args = f"-r {world_file}" if gui else f"-r -s --headless-rendering {world_file}"
+
     sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                get_package_share_directory("gazebo_ros"), "launch", "gazebo.launch.py"
+                get_package_share_directory("ros_gz_sim"), "launch", "gz_sim.launch.py"
             )
         ),
-        launch_arguments={
-            "gui": LaunchConfiguration("sim_gui"),
-            "world": LaunchConfiguration("world_file"),
-        }.items(),
+        launch_arguments={"gz_args": gz_args, "on_exit_shutdown": "true"}.items(),
     )
 
     spawn_robot_node = Node(
-        package="gazebo_ros",
-        executable="spawn_entity.py",
+        package="ros_gz_sim",
+        executable="create",
         arguments=[
             "-topic", "robot_description",
-            "-entity", LaunchConfiguration("robot_entity"),
+            "-name", LaunchConfiguration("robot_entity"),
             "-x", LaunchConfiguration("spawn_x"),
             "-y", LaunchConfiguration("spawn_y"),
             "-Y", LaunchConfiguration("robot_heading"),
             "-z", LaunchConfiguration("spawn_z"),
         ],
         output="screen",
+    )
+
+    bridge_node = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        parameters=[{
+            "config_file": os.path.join(
+                get_package_share_directory("lunabot_config"), "params", "gazebo", "ros_gz_bridge.yaml"
+            ),
+        }],
+        output="screen",
+    )
+
+    pointcloud_to_livox_node = Node(
+        package="lunabot_util",
+        executable="pointcloud_to_livox",
+        parameters=[{"use_sim_time": True}],
     )
 
     topic_remapper_node = Node(
@@ -121,6 +140,8 @@ def create_sim_group(context, *args, **kwargs):
     actions = [
         sim_launch,
         spawn_robot_node,
+        bridge_node,
+        pointcloud_to_livox_node,
         topic_remapper_node,
         joint_state_broadcaster_spawner,
         diff_drive_controller_spawner,

@@ -7,11 +7,12 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "geometry_msgs/msg/twist.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 
 /**
  * @class TopicRemapper
- * @brief Remaps differential drive controller plugin odometry and velocity command topics.
+ * @brief Remaps differential drive controller odometry and stamps /cmd_vel for the controller.
  */
 class TopicRemapper : public rclcpp::Node
 {
@@ -29,8 +30,8 @@ public:
       "/cmd_vel", 10, std::bind(&TopicRemapper::cmd_vel_callback, this, std::placeholders::_1));
 
     odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/wheel_odom", 10);
-    cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
-      "/diff_drive_controller/cmd_vel_unstamped", 10);
+    cmd_vel_pub_ =
+      this->create_publisher<geometry_msgs::msg::TwistStamped>("/diff_drive_controller/cmd_vel", 10);
   }
 
 private:
@@ -46,13 +47,17 @@ private:
    */
   void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
-    cmd_vel_pub_->publish(*msg);
+    geometry_msgs::msg::TwistStamped stamped;
+    stamped.header.stamp = this->now();
+    stamped.header.frame_id = "base_link";
+    stamped.twist = *msg;
+    cmd_vel_pub_->publish(stamped);
   }
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub_;
 };
 
 /**

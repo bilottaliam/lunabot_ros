@@ -43,7 +43,8 @@ def generate_launch_description():
             executable="controller_server",
             name="controller_server",
             output="screen",
-            parameters=[nav2_params_file, {"use_sim_time": use_sim_time}],
+            # /cmd_vel stays geometry_msgs/Twist across the stack
+            parameters=[nav2_params_file, {"use_sim_time": use_sim_time, "enable_stamped_cmd_vel": False}],
         )
 
         planner_server_node = Node(
@@ -59,7 +60,8 @@ def generate_launch_description():
             executable="behavior_server",
             name="behavior_server",
             output="screen",
-            parameters=[nav2_params_file, {"use_sim_time": use_sim_time}],
+            # /cmd_vel stays geometry_msgs/Twist across the stack
+            parameters=[nav2_params_file, {"use_sim_time": use_sim_time, "enable_stamped_cmd_vel": False}],
         )
 
         bt_navigator_node = Node(
