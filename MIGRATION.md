@@ -56,6 +56,8 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
     sim step, so with the Gazebo GUI open on a slow machine (about 7% real-time factor on the test laptop) the default 5 s timeout
     failed and left the robot with no drive controller.
   - Removed `use_stamped_vel` (no longer a diff_drive parameter).
+  - Fixed `wheel_radius` 0.15 → 0.1016 to match the URDF wheels. This bug predates the migration (Humble had it too). With
+    0.15 the robot drove at about 68% of the commanded speed and odometry over-reported distance.
 - **`lunabot_gui`** now declares `python3-pyqt5` / `python3-opencv`, which were only installed by hand before.
 - **`lunabot_gui` on Wayland**: Ubuntu 26.04 runs Qt5 apps on native Wayland. There the control panel got no keyboard
   input, so WASD teleop did nothing. Offscreen QTest checks showed the key handling itself is fine. `gui_launch.py` now

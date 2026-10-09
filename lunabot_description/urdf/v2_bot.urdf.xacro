@@ -577,7 +577,7 @@
       </hardware>
       <joint name="base_front_right_wheel_joint">
         <command_interface name="velocity">
-          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 9.2 -->
           <param name="min">-10</param>
           <param name="max">10</param>
         </command_interface>
@@ -586,7 +586,7 @@
       </joint>
       <joint name="base_front_left_wheel_joint">
         <command_interface name="velocity">
-          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 9.2 -->
           <param name="min">-10</param>
           <param name="max">10</param>
         </command_interface>
@@ -595,7 +595,7 @@
       </joint>
       <joint name="base_rear_right_wheel_joint">
         <command_interface name="velocity">
-          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 9.2 -->
           <param name="min">-10</param>
           <param name="max">10</param>
         </command_interface>
@@ -604,7 +604,7 @@
       </joint>
       <joint name="base_rear_left_wheel_joint">
         <command_interface name="velocity">
-          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 6.3 -->
+          <!-- rad/s; Lyrical ros2_control enforces these, GUI teleop peaks near 9.2 -->
           <param name="min">-10</param>
           <param name="max">10</param>
         </command_interface>
