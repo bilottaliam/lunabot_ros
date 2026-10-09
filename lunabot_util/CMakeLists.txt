@@ -49,4 +49,10 @@ install(PROGRAMS src/bandwidth_monitor.py src/image_compressor.py
                  src/fisheye_camera.py src/encoder_reader.py
                  DESTINATION lib/${PROJECT_NAME})
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_pointcloud_to_livox test/test_pointcloud_to_livox.cpp)
+  target_link_libraries(test_pointcloud_to_livox ${rclcpp_TARGETS} ${sensor_msgs_TARGETS} ${livox_ros_driver2_TARGETS})
+endif()
+
 ament_package()

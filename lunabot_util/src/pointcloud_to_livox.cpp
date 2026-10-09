@@ -3,18 +3,13 @@
  * @date 10/9/2026
  */
 
-#include "livox_ros_driver2/msg/custom_msg.hpp"
+#include "pointcloud_to_livox.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/point_cloud2.hpp"
-#include "sensor_msgs/point_cloud2_iterator.hpp"
-
-#include <cmath>
 
 /**
  * @class PointCloudToLivox
  * @brief Converts the Gazebo gpu_lidar PointCloud2 into the Livox CustomMsg the real MID-360
- * driver publishes, so the simulated lidar feeds the same LIO pipeline. Rays with no return
- * (inf/nan) are dropped.
+ * driver publishes, so the simulated lidar feeds the same LIO pipeline.
  */
 class PointCloudToLivox : public rclcpp::Node
 {
@@ -31,31 +26,7 @@ public:
   }
 
 private:
-  void callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
-  {
-    livox_ros_driver2::msg::CustomMsg out;
-    out.header = msg->header;
-    out.timebase = rclcpp::Time(msg->header.stamp).nanoseconds();
-    out.points.reserve(msg->width * msg->height);
-
-    sensor_msgs::PointCloud2ConstIterator<float> x(*msg, "x"), y(*msg, "y"), z(*msg, "z");
-    for (; x != x.end(); ++x, ++y, ++z)
-    {
-      if (!std::isfinite(*x) || !std::isfinite(*y) || !std::isfinite(*z))
-      {
-        continue;
-      }
-      livox_ros_driver2::msg::CustomPoint p;
-      p.x = *x;
-      p.y = *y;
-      p.z = *z;
-      // gpu_lidar scans are instantaneous, so every point shares the base time
-      p.offset_time = 0;
-      out.points.push_back(p);
-    }
-    out.point_num = out.points.size();
-    pub_->publish(out);
-  }
+  void callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) { pub_->publish(to_livox(*msg)); }
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
   rclcpp::Publisher<livox_ros_driver2::msg::CustomMsg>::SharedPtr pub_;
