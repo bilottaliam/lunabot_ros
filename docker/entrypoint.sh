@@ -7,8 +7,7 @@ if [ ! -w "$HOME/lunabot_ws" ]; then
 fi
 
 unset GTK_PATH
-source /opt/ros/humble/setup.bash
-source /usr/share/gazebo/setup.bash
+source /opt/ros/lyrical/setup.bash
 if [ -f "$HOME/lunabot_ws/install/setup.bash" ]; then
     source "$HOME/lunabot_ws/install/setup.bash"
 fi

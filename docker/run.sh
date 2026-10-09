@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds (if needed) and runs the ROS 2 Humble simulation container.
+# Builds (if needed) and runs the ROS 2 Lyrical simulation container.
 #
 #   docker/run.sh            open a shell in the container, or attach if it is already running
 #   docker/run.sh --build    rebuild the image first
@@ -9,9 +9,9 @@
 # docker volume and never touch the host's build.
 set -e
 
-IMAGE="lunabot:humble"
-CONTAINER="lunabot_humble"
-VOLUME="lunabot_humble_ws"
+IMAGE="lunabot:lyrical"
+CONTAINER="lunabot_lyrical"
+VOLUME="lunabot_lyrical_ws"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$(cd "${REPO_DIR}/.." && pwd)"
 

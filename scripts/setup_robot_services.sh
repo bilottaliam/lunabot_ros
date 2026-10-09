@@ -13,10 +13,9 @@ fi
 # Detect Ubuntu codename and map to ROS distro
 UBUNTU_CODENAME=$(lsb_release -cs)
 case "${UBUNTU_CODENAME}" in
-    jammy)  ROS_DISTRO="humble" ;;
-    noble)  ROS_DISTRO="jazzy"  ;;
+    resolute) ROS_DISTRO="lyrical" ;;
     *)
-        echo "ERROR: Unsupported Ubuntu release '${UBUNTU_CODENAME}'."
+        echo "ERROR: Unsupported Ubuntu release '${UBUNTU_CODENAME}'. Only resolute (26.04) is supported."
         exit 1
         ;;
 esac
