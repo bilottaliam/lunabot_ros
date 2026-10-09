@@ -1,11 +1,13 @@
 <sdf version='1.7'>
   <world name='default'>
-    <gui fullscreen='0'>
-      <camera name='user_camera'>
-        <pose>0.550397 7.43232 16.7573 0 1.3538 -1.4587</pose>
-        <view_controller>orbit</view_controller>
-      </camera>
-    </gui>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+
 
     <light name='sun' type='directional'>
       <cast_shadows>1</cast_shadows>
@@ -23,7 +25,7 @@
 
     <scene>
       <ambient>0.4 0.4 0.4 1</ambient>
-      <background>18 18 18 255</background>
+      <background>0.07 0.07 0.07 1</background>
       <shadows>1</shadows>
       <grid>false</grid>
       <origin_visual>false</origin_visual>
@@ -426,11 +428,8 @@
             </box>
           </geometry>
           <material>
-            <script>
-              <uri>model://apriltags/tag_36_11_00007/materials/scripts</uri>
-              <uri>model://apriltags/tag_36_11_00007/materials/textures</uri>
-              <name>tag_36_11_00007</name>
-            </script>
+            <diffuse>1 1 1 1</diffuse>
+            <pbr><metal><albedo_map>model://apriltags/tag_36_11_00007/materials/textures/tag_36_11_00007.png</albedo_map></metal></pbr>
           </material>
         </visual>
         <collision name='tag_36_11_00007_collision'>
@@ -454,11 +453,8 @@
             </box>
           </geometry>
           <material>
-            <script>
-              <uri>model://apriltags/tag_36_11_00011/materials/scripts</uri>
-              <uri>model://apriltags/tag_36_11_00011/materials/textures</uri>
-              <name>tag_36_11_00011</name>
-            </script>
+            <diffuse>1 1 1 1</diffuse>
+            <pbr><metal><albedo_map>model://apriltags/tag_36_11_00011/materials/textures/tag_36_11_00011.png</albedo_map></metal></pbr>
           </material>
         </visual>
         <collision name='tag_36_11_00011_collision'>

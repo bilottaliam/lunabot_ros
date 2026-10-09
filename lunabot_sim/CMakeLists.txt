@@ -23,4 +23,7 @@ find_package(ament_cmake REQUIRED)
 # Install package files
 install(DIRECTORY models worlds DESTINATION share/${PROJECT_NAME}/)
 
+# Puts the models on GZ_SIM_RESOURCE_PATH so model:// URIs resolve
+ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/hooks/${PROJECT_NAME}.dsv.in")
+
 ament_package()
