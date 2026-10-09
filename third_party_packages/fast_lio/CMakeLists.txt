@@ -115,7 +115,11 @@ else()
   target_link_libraries(fastlio_mapping ${cpp_typesupport_target})
 endif()
 
-ament_target_dependencies(fastlio_mapping ${dependencies})
+# ament_target_dependencies() was removed in Lyrical; link the exported targets instead
+foreach(dep ${dependencies})
+  list(APPEND dependencies_TARGETS ${${dep}_TARGETS})
+endforeach()
+target_link_libraries(fastlio_mapping ${dependencies_TARGETS})
 
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping DESTINATION lib/${PROJECT_NAME})

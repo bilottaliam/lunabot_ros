@@ -82,9 +82,8 @@ add_executable(pointlio_mapping
   src/IMU_Processing.cpp
 )
 
-ament_target_dependencies(pointlio_mapping
+set(dependencies
   rclcpp
-  rclpy
   geometry_msgs
   nav_msgs
   sensor_msgs
@@ -94,6 +93,12 @@ ament_target_dependencies(pointlio_mapping
   tf2_ros
   livox_ros_driver2
 )
+
+# ament_target_dependencies() was removed in Lyrical; link the exported targets instead
+foreach(dep ${dependencies})
+  list(APPEND dependencies_TARGETS ${${dep}_TARGETS})
+endforeach()
+target_link_libraries(pointlio_mapping ${dependencies_TARGETS})
 
 target_link_libraries(pointlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES})
 target_include_directories(pointlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})

@@ -21,12 +21,16 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # Find required dependencies
+find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(lunabot_msgs REQUIRED)
+find_package(Threads REQUIRED)  # sparkcan links Threads::Threads but does not find it
+# sparkcan exports Threads::Threads without finding it
+find_package(Threads REQUIRED)
 find_package(sparkcan REQUIRED)
 find_package(lunabot_logger REQUIRED)
 
@@ -34,24 +38,25 @@ find_package(lunabot_logger REQUIRED)
 add_executable(controller_teleop src/controller_teleop.cpp)
 add_executable(motor_controller src/motor_controller.cpp)
 
-ament_target_dependencies(
+# ament_target_dependencies() was removed in Lyrical; link the exported targets instead
+target_link_libraries(
   controller_teleop
-  rclcpp
-  rclcpp_action
-  sensor_msgs
-  geometry_msgs
-  std_msgs
-  lunabot_msgs
-  sparkcan
-  lunabot_logger)
+  ${rclcpp_TARGETS}
+  ${rclcpp_action_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${lunabot_msgs_TARGETS}
+  sparkcan::sparkcan)
+target_include_directories(controller_teleop PRIVATE ${lunabot_logger_INCLUDE_DIRS})
 
-ament_target_dependencies(
+target_link_libraries(
   motor_controller
-  rclcpp
-  std_msgs
-  lunabot_msgs
-  sparkcan
-  lunabot_logger)
+  ${rclcpp_TARGETS}
+  ${std_msgs_TARGETS}
+  ${lunabot_msgs_TARGETS}
+  sparkcan::sparkcan)
+target_include_directories(motor_controller PRIVATE ${lunabot_logger_INCLUDE_DIRS})
 
 # Install package files
 install(TARGETS controller_teleop motor_controller DESTINATION lib/${PROJECT_NAME})

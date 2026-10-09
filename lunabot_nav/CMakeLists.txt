@@ -21,6 +21,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # Find required dependencies
+find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(lunabot_msgs REQUIRED)
 find_package(nav2_core REQUIRED)
@@ -35,6 +36,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(Threads REQUIRED)  # sparkcan links Threads::Threads but does not find it
+# sparkcan exports Threads::Threads without finding it
+find_package(Threads REQUIRED)
 find_package(sparkcan REQUIRED)
 find_package(lunabot_logger REQUIRED)
 
@@ -69,6 +73,14 @@ set(SIM_DEPENDENCIES
     sensor_msgs
     tf2_ros)
 
+# ament_target_dependencies() was removed in Lyrical; link the exported targets instead
+foreach(dep ${DEPENDENCIES})
+  list(APPEND DEPENDENCIES_TARGETS ${${dep}_TARGETS})
+endforeach()
+foreach(dep ${SIM_DEPENDENCIES})
+  list(APPEND SIM_DEPENDENCIES_TARGETS ${${dep}_TARGETS})
+endforeach()
+
 # Define build targets
 add_executable(assisted_excavation_server src/assisted_excavation_server.cpp)
 add_executable(auto_excavation_server src/auto_excavation_server.cpp)
@@ -79,14 +91,21 @@ add_executable(navigation_client src/navigation_client.cpp)
 add_executable(excavation_server_sim src/excavation_server_sim.cpp)
 add_executable(depositing_server_sim src/depositing_server_sim.cpp)
 
-ament_target_dependencies(assisted_excavation_server ${DEPENDENCIES})
-ament_target_dependencies(auto_excavation_server ${DEPENDENCIES})
-ament_target_dependencies(assisted_depositing_server ${DEPENDENCIES})
-ament_target_dependencies(auto_depositing_server ${DEPENDENCIES})
-ament_target_dependencies(navigation_client ${DEPENDENCIES})
+target_link_libraries(assisted_excavation_server ${DEPENDENCIES_TARGETS} sparkcan::sparkcan)
+target_include_directories(assisted_excavation_server PRIVATE ${lunabot_logger_INCLUDE_DIRS})
+target_link_libraries(auto_excavation_server ${DEPENDENCIES_TARGETS} sparkcan::sparkcan)
+target_include_directories(auto_excavation_server PRIVATE ${lunabot_logger_INCLUDE_DIRS})
+target_link_libraries(assisted_depositing_server ${DEPENDENCIES_TARGETS} sparkcan::sparkcan)
+target_include_directories(assisted_depositing_server PRIVATE ${lunabot_logger_INCLUDE_DIRS})
+target_link_libraries(auto_depositing_server ${DEPENDENCIES_TARGETS} sparkcan::sparkcan)
+target_include_directories(auto_depositing_server PRIVATE ${lunabot_logger_INCLUDE_DIRS})
+target_link_libraries(navigation_client ${DEPENDENCIES_TARGETS} sparkcan::sparkcan)
+target_include_directories(navigation_client PRIVATE ${lunabot_logger_INCLUDE_DIRS})
 
-ament_target_dependencies(excavation_server_sim ${SIM_DEPENDENCIES})
-ament_target_dependencies(depositing_server_sim ${SIM_DEPENDENCIES})
+target_link_libraries(excavation_server_sim ${SIM_DEPENDENCIES_TARGETS})
+target_include_directories(excavation_server_sim PRIVATE ${lunabot_logger_INCLUDE_DIRS})
+target_link_libraries(depositing_server_sim ${SIM_DEPENDENCIES_TARGETS})
+target_include_directories(depositing_server_sim PRIVATE ${lunabot_logger_INCLUDE_DIRS})
 
 # Install package files
 install(
