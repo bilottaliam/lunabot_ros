@@ -57,6 +57,9 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
     failed and left the robot with no drive controller.
   - Removed `use_stamped_vel` (no longer a diff_drive parameter).
 - **`lunabot_gui`** now declares `python3-pyqt5` / `python3-opencv`, which were only installed by hand before.
+- **`lunabot_gui` on Wayland**: Ubuntu 26.04 runs Qt5 apps on native Wayland. There the control panel got no keyboard
+  input, so WASD teleop did nothing. Offscreen QTest checks showed the key handling itself is fine. `gui_launch.py` now
+  sets `QT_QPA_PLATFORM=xcb` (XWayland) for the GUI unless the variable is already set.
 
 ### ROS 2 API changes
 - `ament_target_dependencies()` was removed in Lyrical. The CMake files of `lunabot_nav`, `lunabot_teleop`, `lunabot_util`, `fast_lio` and `point_lio`

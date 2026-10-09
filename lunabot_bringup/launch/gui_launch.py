@@ -217,6 +217,9 @@ def generate_launch_description():
         package="lunabot_gui",
         executable="lunabot_gui",
         name="lunabot_gui",
+        # Ubuntu 26.04 runs Qt5 apps on native Wayland, where the GUI gets no keyboard input
+        # (WASD teleop). Use X11 via XWayland unless a platform was chosen explicitly.
+        additional_env={"QT_QPA_PLATFORM": os.environ.get("QT_QPA_PLATFORM", "xcb")},
         parameters=[
             gui_params_file,
             {'mode': LaunchConfiguration('use_sim', default='true')},
