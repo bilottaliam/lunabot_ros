@@ -28,6 +28,12 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
   - `libgazebo_ros_imu_sensor.so` → gz `imu` sensor with the same 0.01 gaussian noise
   - `libgazebo_ros2_control.so` / `gazebo_ros2_control/GazeboSystem` → `gz_ros2_control-system` / `gz_ros2_control/GazeboSimSystem`
   - Removed the `Gazebo/Grey` material tags, which gz-sim ignores.
+  - Wheel friction now uses the URDF `<gazebo>` extension tags `<mu1>/<mu2>/<kp>/<kd>`. The old `<mu>` and
+    `<surface><ode>` children were never mapped by sdformat and were silently ignored. ODE `slip1/slip2` has no gz-sim
+    equivalent and is dropped.
+  - `ros2_control` command limits are now enforced. They were ignored under gazebo_ros2_control. Wheel velocity
+    limits went from ±1 rad/s (0.15 m/s, below what Nav2 and the GUI command) to ±10 rad/s, and bucket position limits from ±0.75 to the
+    joint's real range [-1.57, 0.1], so the robot behaves as it did on Humble.
 - **Livox MID-360**: the vendored `livox_laser_simulation_RO2` plugin is Gazebo Classic only (it links `gazebo_dev`), and
   no gz-sim port exists. It is replaced by a `gpu_lidar` sensor (360 × 32 rays, same −0.126…0.964 rad vertical FOV and range)
   plus a new node, `lunabot_util/pointcloud_to_livox`. That node converts the bridged PointCloud2 into
@@ -40,6 +46,16 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
   All 8 worlds pass `gz sdf -k`.
 - **Model path**: the `gazebo_ros gazebo_model_path` export becomes an ament env hook that adds
   `share/lunabot_sim/models` to `GZ_SIM_RESOURCE_PATH`.
+
+- **Controllers** (`lunabot_config/params/gazebo/*.yaml`, `gui_launch.py`):
+  - `position_controllers/JointGroupPositionController` no longer exists in Lyrical. `position_controller` and
+    `camera_controller` are now `forward_command_controller/ForwardCommandController` with `interface_name: position`.
+    The `~/commands` topic and message type are unchanged, so the GUI needs no change.
+  - Controllers no longer inherit the params file given to `gz_ros2_control`, so the spawner passes it with `--param-file`.
+  - A single spawner now activates all controllers. Four parallel spawners hit "Switch controller timed out" when the sim
+    runs slower than real time.
+  - Removed `use_stamped_vel` (no longer a diff_drive parameter).
+- **`lunabot_gui`** now declares `python3-pyqt5` / `python3-opencv`, which were only installed by hand before.
 
 ### ROS 2 API changes
 - `ament_target_dependencies()` was removed in Lyrical. The CMake files of `lunabot_nav`, `lunabot_teleop`, `lunabot_util`, `fast_lio` and `point_lio`
@@ -77,4 +93,29 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
 - The simulated lidar resolution (360 × 32) matches the old plugin's published point count (~10k points per scan).
 
 ## Verification
-See the "Verification" section at the end of this file. It is updated with the results of the build, test and sim runs.
+
+Verification ran natively on an Ubuntu 26.04 host with ROS 2 Lyrical and Gazebo Jetty (gz-sim 10), not in Docker. Docker
+and sudo weren't available, so the missing ROS debs were extracted into a user-local prefix.
+
+| Check | Result |
+|---|---|
+| `colcon build` (all 28 packages, incl. rtabmap 0.23.13 with libpointmatcher and `RTABMAP_SYNC_MULTI_RGBD=ON`) | ✅ |
+| `colcon test` (`lunabot_*`, `fast_lio`, `point_lio`, `livox_ros_driver2`) | ✅ 1 gtest (`test_pointcloud_to_livox`). The other packages have no tests. |
+| All 8 worlds: `gz sdf -k` | ✅ Valid |
+| Both robots: xacro → `gz sdf -p` | ✅ 3 rgbd_camera, 1 gpu_lidar, 1 imu, gz_ros2_control plugin |
+| Headless sim (`gui_launch.py use_sim:=true sim_gui:=false`, v2_bot, artemis) | ✅ robot spawns |
+| Controllers | ✅ joint_state_broadcaster, diff_drive_controller, camera_controller, position_controller all `active` |
+| Topics | ✅ `/clock`, `/livox/imu`, `/livox/lidar_points`, `/livox/lidar` (~11k points per scan), all 3 cameras' color and depth, `/joint_states`, `/wheel_odom`, `/tf`, with correct `frame_id`s |
+| Drive: `/cmd_vel` → `/wheel_odom` | ✅ x went from 0.0 to 0.39 m |
+| Same sim with the Gazebo GUI | ✅ launched and all controllers active (run by the user) |
+
+### Not verified
+- **Docker image build**: Docker isn't installed on the verification host. The Dockerfile follows the same steps that
+  were verified natively.
+- **`install_dependencies.sh`**: needs sudo, so it wasn't run. Its source builds match what was built locally.
+- **LIO / RTAB-Map / Nav2 in the loop**: the packages build and their inputs (`/livox/lidar`, `/livox/imu`, cameras)
+  publish, but `pointlio_launch.py`, `mapping_launch.py` and `nav2_stack_launch.py` were not run against the sim.
+  The Nav2 params and behavior trees haven't been checked against Nav2 Lyrical parameter changes.
+- **Real hardware** (`hardware_launch.py`, CAN, Livox driver, RealSense).
+- The sim ran well below real time on the test laptop, which renders all four sensors in software, so sensor rates there are not representative.
+- The bucket position command was sent, but the resulting joint motion wasn't checked.
