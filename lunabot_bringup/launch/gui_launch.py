@@ -111,9 +111,11 @@ def create_sim_group(context, *args, **kwargs):
         f"gazebo_{context.launch_configurations.get('robot_type')}_params.yaml",
     )
 
+    # Sim time, so the stamps it adds match diff_drive_controller's cmd_vel_timeout clock
     topic_remapper_node = Node(
         package="lunabot_util",
         executable="topic_remapper",
+        parameters=[{"use_sim_time": True}],
     )
 
     # One spawner activates every controller in a single switch; separate spawners time out
