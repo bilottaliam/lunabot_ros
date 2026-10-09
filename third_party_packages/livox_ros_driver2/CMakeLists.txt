@@ -133,6 +133,9 @@ rclcpp_components_register_node(${PROJECT_NAME}
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  # Vendored upstream code: skip the style linters (the package has no functional tests)
+  list(APPEND AMENT_LINT_AUTO_EXCLUDE ament_cmake_copyright ament_cmake_cpplint ament_cmake_flake8
+    ament_cmake_lint_cmake ament_cmake_uncrustify ament_cmake_xmllint ament_cmake_cppcheck ament_cmake_pep257)
   # the following line skips the linter which checks for copyrights
   # uncomment the line when a copyright and license is not present in all source files
   #set(ament_cmake_copyright_FOUND TRUE)
