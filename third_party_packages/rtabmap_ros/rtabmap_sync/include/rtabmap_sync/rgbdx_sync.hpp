@@ -34,9 +34,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <image_transport/image_transport.hpp>
 #include <image_transport/subscriber_filter.hpp>
 
-#include <message_filters/sync_policies/approximate_time.h>
-#include <message_filters/sync_policies/exact_time.h>
-#include <message_filters/subscriber.h>
+#include <message_filters/sync_policies/approximate_time.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
+#include <message_filters/subscriber.hpp>
 
 #include "rtabmap_msgs/msg/rgbd_image.hpp"
 #include "rtabmap_msgs/msg/rgbd_images.hpp"
@@ -46,6 +46,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace rtabmap_sync
 {
 
+/**
+ * @brief Groups the `RGBDImage` topics of 2 to 8 cameras into one `RGBDImages`.
+ *
+ * For a robot carrying several RGB-D cameras. Synchronizing them here, once, means the
+ * consuming node subscribes to a single topic and needs no multi-camera build option --
+ * `rgbd_cameras=0` on CommonDataSubscriber takes the container this publishes.
+ *
+ * See the [node documentation](https://github.com/introlab/rtabmap_ros/blob/ros2/rtabmap_sync/doc/rgbdx_sync.md)
+ * for topics and parameters.
+ */
 class RGBDXSync : public rclcpp::Node
 {
 public:

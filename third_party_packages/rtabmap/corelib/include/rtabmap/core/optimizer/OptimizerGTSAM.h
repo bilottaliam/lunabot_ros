@@ -58,8 +58,21 @@ public:
 			double * finalError = 0,
 			int * iterationsDone = 0);
 
+	virtual std::map<int, Transform> optimizeBA(
+			int rootId,
+			const std::map<int, Transform> & poses,
+			const std::multimap<int, Link> & links,
+			const std::map<int, std::vector<CameraModel> > & models,
+			std::map<int, cv::Point3f> & points3DMap,
+			const std::map<int, std::map<int, FeatureBA> > & wordReferences,
+			BAOutliers * outliers = 0);
+
 private:
 	int internalOptimizerType_;
+	double pixelVariance_;
+	double disparityVariance_;
+	double robustKernelDelta_;
+	double baseline_;
 
 	gtsam::ISAM2 * isam2_;
 	struct ConstraintToFactor {
@@ -77,6 +90,7 @@ private:
 	std::vector<ConstraintToFactor> lastAddedConstraints_;
 	int lastSwitchId_;
 	std::set<int> addedPoses_;
+	std::map<int, bool> isLandmarkWithRotation_; // persists across iSAM2 incremental calls
 	std::pair<int, std::uint64_t> lastRootFactorIndex_;
 };
 

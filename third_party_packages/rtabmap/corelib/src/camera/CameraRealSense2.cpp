@@ -30,7 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UThreadC.h>
 #include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/utilite/UStl.h>
-#include <opencv2/imgproc/types_c.h>
+#include <rtabmap/utilite/UDirectory.h>
 
 #ifdef RTABMAP_REALSENSE2
 #include <librealsense2/rsutil.h>
@@ -78,7 +78,8 @@ CameraRealSense2::CameraRealSense2(
 	cameraDepthFps_(30),
 	globalTimeSync_(true),
 	dualMode_(false),
-	closing_(false)
+	closing_(false),
+	playback_(false)
 #endif
 {
 	UDEBUG("");
@@ -105,10 +106,14 @@ void CameraRealSense2::close()
 			{
 				if(!_sensor.get_active_streams().empty())
 				{
+					std::string sensorName = _sensor.supports(RS2_CAMERA_INFO_NAME) ? _sensor.get_info(RS2_CAMERA_INFO_NAME) : "?";
 					try
 					{
+						UDEBUG("stop() sensor \"%s\"...", sensorName.c_str());
 						_sensor.stop();
+						UDEBUG("stop() sensor \"%s\" done; close()...", sensorName.c_str());
 						_sensor.close();
+						UDEBUG("close() sensor \"%s\" done", sensorName.c_str());
 					}
 					catch(const rs2::error & error)
 					{
@@ -117,12 +122,15 @@ void CameraRealSense2::close()
 				}
 			}
 #ifdef WIN32
+			UDEBUG("Windows-only: Hardware reset (to avoid freezing when clearing devices)...");
 			dev_[i].hardware_reset(); // To avoid freezing on some Windows computers in the following destructor
 			// Don't do this on linux (tested on Ubuntu 18.04, realsense v2.41.0): T265 cannot be restarted
+			UDEBUG("Windows-only: Hardware reset... done");
 #endif
 		}
 		UDEBUG("Clearing devices...");
 		dev_.clear();
+		UDEBUG("Clearing devices... done!");
 	}
 	catch(const rs2::error & error)
 	{
@@ -130,6 +138,7 @@ void CameraRealSense2::close()
 	}
 
 	closing_ = false;
+	playback_ = false;
 }
 
 void CameraRealSense2::imu_callback(rs2::frame frame)
@@ -492,64 +501,88 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 	clockSyncWarningShown_ = false;
 	imuGlobalSyncWarningShown_ = false;
 
-	rs2::device_list list = ctx_.query_devices();
-	if (0 == list.size())
+	if(uStrContains(deviceId_, ".bag"))
 	{
-		UERROR("No RealSense2 devices were found!");
-		return false;
+		// playback (bag recorded by realsense-viewer)
+		dev_.resize(1);
+		dev_[0] = ctx_.load_device(uReplaceChar(deviceId_, '~', UDirectory::homeDir()));
+		playback_ = true;
+		UINFO("Device ID is a bag (\"%s\"), using playback mode", deviceId_.c_str());
 	}
-
-	bool found=false;
-	try
+	else
 	{
-		for (rs2::device dev : list)
+		rs2::device_list list = ctx_.query_devices();
+		if (0 == list.size())
 		{
-			auto sn = dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER);
-			auto pid_str = dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID);
-			auto name = dev.get_info(RS2_CAMERA_INFO_NAME);
+#ifdef __APPLE__
+			UERROR("No RealSense2 devices were found! On macOS the RealSense SDK accesses "
+			       "the camera through libusb, which must take the USB interface from the "
+			       "system driver; this requires root privileges. If a device is connected "
+			       "but not detected, run the application with sudo.");
+#else
+			UERROR("No RealSense2 devices were found!");
+#endif
+			return false;
+		}
 
-			uint16_t pid;
-			std::stringstream ss;
-			ss << std::hex << pid_str;
-			ss >> pid;
-			UINFO("Device \"%s\" with serial number %s was found with product ID=%d.", name, sn, (int)pid);
-			if(dualMode_ && pid == 0x0B37)
+		bool found=false;
+		try
+		{
+			for (rs2::device dev : list)
 			{
-				// Dual setup: device[0] = D400, device[1] = T265
-				// T265
-				dev_.resize(2);
-				dev_[1] = dev;
-			}
-			else if (!found && (deviceId_.empty() || deviceId_ == sn || uStrContains(name, uToUpperCase(deviceId_))))
-			{
-				if(dev_.empty())
+				auto sn = dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER);
+				auto pid_str = dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+				auto name = dev.get_info(RS2_CAMERA_INFO_NAME);
+
+				uint16_t pid;
+				std::stringstream ss;
+				ss << std::hex << pid_str;
+				ss >> pid;
+				UINFO("Device \"%s\" with serial number %s was found with product ID=%d.", name, sn, (int)pid);
+				if(dualMode_ && pid == 0x0B37)
 				{
-					dev_.resize(1);
+					// Dual setup: device[0] = D400, device[1] = T265
+					// T265
+					dev_.resize(2);
+					dev_[1] = dev;
 				}
-				dev_[0] = dev;
-				found=true;
+				else if (!found && (deviceId_.empty() || deviceId_ == sn || uStrContains(name, uToUpperCase(deviceId_))))
+				{
+					if(dev_.empty())
+					{
+						dev_.resize(1);
+					}
+					dev_[0] = dev;
+					found=true;
+				}
 			}
 		}
-	}
-	catch(const rs2::error & error)
-	{
-		UWARN("%s. Is the camera already used with another app?", error.what());
+		catch(const rs2::error & error)
+		{
+#ifdef __APPLE__
+			UERROR("%s. Is the camera already used with another app? On macOS, accessing a "
+			      "RealSense camera requires root privileges, so try running with sudo.", error.what());
+#else
+			UERROR("%s. Is the camera already used with another app?", error.what());
+#endif
+		}
+
+		if (!found)
+		{
+			if(dualMode_ && dev_.size()==2)
+			{
+				UERROR("Dual setup is enabled, but a D400 camera is not detected!");
+				dev_.clear();
+			}
+			else
+			{
+				UERROR("The requested device \"%s\" is NOT found!", deviceId_.c_str());
+			}
+			return false;
+		}
 	}
 
-	if (!found)
-	{
-		if(dualMode_ && dev_.size()==2)
-		{
-			UERROR("Dual setup is enabled, but a D400 camera is not detected!");
-			dev_.clear();
-		}
-		else
-		{
-			UERROR("The requested device \"%s\" is NOT found!", deviceId_.c_str());
-		}
-		return false;
-	}
-	else if(dualMode_ && dev_.size()!=2)
+	if(dualMode_ && dev_.size()!=2)
 	{
 		UERROR("Dual setup is enabled, but a T265 camera is not detected!");
 		dev_.clear();
@@ -592,11 +625,11 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 			{
 				if (closing_)
 				{
-					UDEBUG("The device %d has been disconnected!", i);
+					UDEBUG("The device %d has been disconnected!", (int)i);
 				}
 				else
 				{
-					UERROR("The device %d has been disconnected!", i);
+					UERROR("The device %d has been disconnected!", (int)i);
 				}
 			}
 		}
@@ -632,7 +665,17 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 		if ("Stereo Module" == module_name)
 		{
 			sensors[1] = elem;
-			sensors[1].set_option(rs2_option::RS2_OPTION_EMITTER_ENABLED, emitterEnabled_);
+			if(sensors[1].supports(rs2_option::RS2_OPTION_EMITTER_ENABLED))
+			{
+				if(!sensors[1].is_option_read_only(rs2_option::RS2_OPTION_EMITTER_ENABLED))
+				{
+					sensors[1].set_option(rs2_option::RS2_OPTION_EMITTER_ENABLED, emitterEnabled_);
+				}
+				else if(!emitterEnabled_)
+				{
+					UWARN("rs2_option::RS2_OPTION_EMITTER_ENABLED option is read-only, cannot disable IR emitter.");
+				}
+			}
 		}
 		else if ("Coded-Light Depth Sensor" == module_name)
 		{
@@ -709,14 +752,14 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 			for (auto& profile : profiles)
 			{
 				auto video_profile = profile.as<rs2::video_stream_profile>();
-				UINFO("%s %d %d %d %d %s type=%d", rs2_format_to_string(
-						video_profile.format()),
-						video_profile.width(),
-						video_profile.height(),
-						video_profile.fps(),
-						video_profile.stream_index(),
-						video_profile.stream_name().c_str(),
-						video_profile.stream_type());
+				UINFO("%s %d %d %d %d %s type=%d", 
+						rs2_format_to_string(profile.format()),
+						video_profile.get()?video_profile.width():-1,
+						video_profile.get()?video_profile.height():-1,
+						profile.fps(),
+						profile.stream_index(),
+						profile.stream_name().c_str(),
+						profile.stream_type());
 			}
 		}
 		int pi = 0;
@@ -725,10 +768,12 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 			auto video_profile = profile.as<rs2::video_stream_profile>();
 			if(!stereo)
 			{
-				if( (video_profile.width()  == cameraWidth_ &&
+				if( (video_profile.get() &&
+					 video_profile.width()  == cameraWidth_ &&
 					 video_profile.height() == cameraHeight_ &&
 					 video_profile.fps()    == cameraFps_) ||
-						(strcmp(sensors[i].get_info(RS2_CAMERA_INFO_NAME), "L500 Depth Sensor")==0 &&
+						((strcmp(sensors[i].get_info(RS2_CAMERA_INFO_NAME), "L500 Depth Sensor")==0 || 
+						  (playback_ && strcmp(sensors[i].get_info(RS2_CAMERA_INFO_NAME), "Stereo Module")==0)) &&
 							video_profile.width()  == cameraDepthWidth_ &&
 							video_profile.height() == cameraDepthHeight_ &&
 							video_profile.fps()    == cameraDepthFps_))
@@ -737,7 +782,7 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 
 					// rgb or ir left
 					if((!ir_ && video_profile.format() == RS2_FORMAT_RGB8 && video_profile.stream_type() == RS2_STREAM_COLOR) ||
-					  (ir_ && video_profile.format() == RS2_FORMAT_Y8 && (video_profile.stream_index() == 1 || isL500)))
+					   (ir_ && video_profile.format() == RS2_FORMAT_Y8 && (video_profile.stream_index() == 1 || isL500)))
 					{
 						if(!profilesPerSensor[i].empty())
 						{
@@ -775,7 +820,7 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 						}
 					}
 				}
-				else if(video_profile.format() == RS2_FORMAT_MOTION_XYZ32F || video_profile.format() == RS2_FORMAT_6DOF)
+				else if(profile.format() == RS2_FORMAT_MOTION_XYZ32F || profile.format() == RS2_FORMAT_6DOF)
 				{
 					//D435i:
 					//MOTION_XYZ32F 0 0 200 (gyro)
@@ -814,6 +859,7 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 			{
 				//T265:
 				if(!dualMode_ &&
+					video_profile.get() &&
 					video_profile.format() == RS2_FORMAT_Y8 &&
 					video_profile.width()  == 848 &&
 					video_profile.height() == 800 &&
@@ -862,7 +908,7 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 					}
 					added = true;
 				}
-				else if(video_profile.format() == RS2_FORMAT_MOTION_XYZ32F || video_profile.format() == RS2_FORMAT_6DOF)
+				else if(profile.format() == RS2_FORMAT_MOTION_XYZ32F || profile.format() == RS2_FORMAT_6DOF)
 				{
 					//MOTION_XYZ32F 0 0 200
 					//MOTION_XYZ32F 0 0 62
@@ -875,20 +921,29 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 		}
 		if (!added)
 		{
-			UERROR("Given stream configuration is not supported by the device! "
-					"Stream Index: %d, Width: %d, Height: %d, FPS: %d", i, cameraWidth_, cameraHeight_, cameraFps_);
+			if(strcmp(sensors[i].get_info(RS2_CAMERA_INFO_NAME), "L500 Depth Sensor")==0 || 
+			   (playback_ && strcmp(sensors[i].get_info(RS2_CAMERA_INFO_NAME), "Stereo Module")==0))
+			{
+				UERROR("Given stream configuration is not supported by the device! "
+						"Stream Index: %d, Width: %d, Height: %d, FPS: %d", i, cameraDepthWidth_, cameraDepthHeight_, cameraDepthFps_);
+			}
+			else
+			{
+				UERROR("Given stream configuration is not supported by the device! "
+						"Stream Index: %d, Width: %d, Height: %d, FPS: %d", i, cameraWidth_, cameraHeight_, cameraFps_);
+			}
 			UERROR("Available configurations:");
 			for (auto& profile : profiles)
 			{
 				auto video_profile = profile.as<rs2::video_stream_profile>();
-				UERROR("%s %d %d %d %d %s type=%d", rs2_format_to_string(
-						video_profile.format()),
-						video_profile.width(),
-						video_profile.height(),
-						video_profile.fps(),
-						video_profile.stream_index(),
-						video_profile.stream_name().c_str(),
-						video_profile.stream_type());
+				UERROR("%s %d %d %d %d %s type=%d",
+						rs2_format_to_string(profile.format()),
+						video_profile.get()?video_profile.width():-1,
+						video_profile.get()?video_profile.height():-1,
+						profile.fps(),
+						profile.stream_index(),
+						profile.stream_name().c_str(),
+						profile.stream_type());
 			}
 			return false;
 		}
@@ -1072,19 +1127,26 @@ bool CameraRealSense2::init(const std::string & calibrationFolder, const std::st
 			 {
 				 auto video_profile = profilesPerSensor[i][j].as<rs2::video_stream_profile>();
 				 UINFO("Opening: %s %d %d %d %d %s type=%d", rs2_format_to_string(
-						 video_profile.format()),
-						 video_profile.width(),
-						 video_profile.height(),
-						 video_profile.fps(),
-						 video_profile.stream_index(),
-						 video_profile.stream_name().c_str(),
-						 video_profile.stream_type());
+						 profilesPerSensor[i][j].format()),
+						 video_profile.get()?video_profile.width():-1,
+						 video_profile.get()?video_profile.height():-1,
+						 profilesPerSensor[i][j].fps(),
+						 profilesPerSensor[i][j].stream_index(),
+						 profilesPerSensor[i][j].stream_name().c_str(),
+						 profilesPerSensor[i][j].stream_type());
 			 }
 			 if(globalTimeSync_ && sensors[i].supports(rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED))
 			 {
-				 float value = sensors[i].get_option(rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED);
-				 UINFO("Set RS2_OPTION_GLOBAL_TIME_ENABLED=1 (was %f) for sensor %d", value, (int)i);
-				 sensors[i].set_option(rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED, 1);
+				float value = sensors[i].get_option(rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED);
+				UINFO("Set RS2_OPTION_GLOBAL_TIME_ENABLED=1 (was %f) for sensor %d", value, (int)i);
+				if(!sensors[i].is_option_read_only(rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED))
+				{
+					sensors[i].set_option(rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED, 1);
+				}
+				else if(value != 1)
+				{
+					UWARN("rs2_option::RS2_OPTION_GLOBAL_TIME_ENABLED option is read-only, cannot enable it.");
+				}
 			 }
 			 sensors[i].open(profilesPerSensor[i]);
 			 if(sensors[i].is<rs2::depth_sensor>())
@@ -1377,7 +1439,7 @@ SensorData CameraRealSense2::captureImage(SensorCaptureInfo * info)
 				cv::Mat bgr;
 				if(rgb.channels() == 3)
 				{
-					cv::cvtColor(rgb, bgr, CV_RGB2BGR);
+					cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
 				}
 				else
 				{
@@ -1522,11 +1584,21 @@ SensorData CameraRealSense2::captureImage(SensorCaptureInfo * info)
 		else
 		{
 			UERROR("Missing frames (received %d, needed=%d)", (int)frameset.size(), desiredFramesetSize);
+			if(frameset.size()>0)
+			{
+				for (auto it = frameset.begin(); it != frameset.end(); ++it)
+				{
+					UERROR("Received frame only from %s", (*it).get_profile().stream_name().c_str());
+				}
+			}
 		}
 	}
 	catch(const std::exception& ex)
 	{
-		UERROR("An error has occurred during frame callback: %s", ex.what());
+		if(!playback_)
+		{
+			UERROR("An error has occurred during frame callback: %s", ex.what());
+		}
 	}
 #else
 	UERROR("CameraRealSense2: RTAB-Map is not built with RealSense2 support!");

@@ -41,23 +41,53 @@ class Feature2D;
 class PyMatcher;
 #endif
 
-// Visual registration
+/**
+ * @class RegistrationVis
+ * @brief Visual registration between two signatures using features and geometry.
+ *
+ * Extracts and matches features (@ref Feature2D), then estimates motion with
+ * **Vis/EstimationType** (3D→3D, 3D→2D PnP, or 2D→2D epipolar). Supports RGB-D
+ * (@ref CameraModel + depth), stereo (@ref StereoCameraModel), optical flow, GMS,
+ * and optional Python matchers when built with Python support.
+ *
+ * Can chain a child registration (e.g. @ref RegistrationIcp in
+ * @ref Registration::kTypeVisIcp). Feature-related Vis/ parameters are mapped
+ * to Kp/ for @ref Feature2D::create().
+ *
+ * @see Registration
+ * @see RegistrationInfo
+ */
 class RTABMAP_CORE_EXPORT RegistrationVis : public Registration
 {
 public:
-	// take ownership of child
+	/** @brief @p child is owned and deleted in the destructor. */
 	RegistrationVis(const ParametersMap & parameters = ParametersMap(), Registration * child = 0);
 	virtual ~RegistrationVis();
 
+	/** @brief Parses Vis/ and feature parameters; recreates feature detectors. */
 	virtual void parseParameters(const ParametersMap & parameters);
 
+	/** @return **Vis/InlierDistance** (m). */
 	float getInlierDistance() const {return _inlierDistance;}
+	/** @return **Vis/Iterations** (RANSAC iterations). */
 	int getIterations() const {return _iterations;}
+	/** @return **Vis/MinInliers**. */
 	int getMinInliers() const {return _minInliers;}
+	/** @return **Vis/CorNNType** nearest-neighbor strategy. */
 	int getNNType() const {return _nnType;}
+	/** @return Name of the **Vis/CorNNType** nearest-neighbor strategy in use. */
+	std::string getNNTypeName() const {return getNNTypeName(_nnType);}
+
+	/**
+	 * @brief Name of a Vis/CorNNType value
+	 */
+	static std::string getNNTypeName(int nnType);
+	/** @return **Vis/CorNNDR** ratio test threshold. */
 	float getNNDR() const {return _nndr;}
+	/** @return **Vis/EstimationType** (0: 3D→3D, 1: PnP, 2: epipolar). */
 	int getEstimationType() const {return _estimationType;}
 
+	/** @return Feature detector used for the “from” signature. */
 	const Feature2D * getDetector() const {return _detectorFrom;}
 
 protected:
@@ -78,7 +108,6 @@ private:
 	int _refineIterations;
 	float _epipolarGeometryVar;
 	int _estimationType;
-	bool _forwardEstimateOnly;
 	float _PnPReprojError;
 	int _PnPFlags;
 	int _PnPRefineIterations;
@@ -92,6 +121,9 @@ private:
 	float _flowEps;
 	int _flowMaxLevel;
 	bool _flowGpu;
+	bool _flowUseMinEigenVals;
+	float _flowMinEigThreshold;
+	float _flowErrorThreshold;
 	float _nndr;
 	int _nnType;
 	bool _gmsWithRotation;
@@ -101,6 +133,7 @@ private:
 	bool _guessMatchToProjection;
 	int _bundleAdjustment;
 	bool _depthAsMask;
+	float _maskFloorThreshold;
 	float _minInliersDistributionThr;
 	float _maxInliersMeanDistance;
 

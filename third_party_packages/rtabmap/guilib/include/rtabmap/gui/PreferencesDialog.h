@@ -98,6 +98,7 @@ public:
 		kSrcRealSense2     = 9,
 		kSrcK4A            = 10,
 		kSrcSeerSense      = 11,
+		kSrcOrbbecSDK      = 12,
 
 		kSrcStereo         = 100,
 		kSrcDC1394         = 100,
@@ -129,6 +130,12 @@ public:
 
 	virtual QString getIniFilePath() const;
 	virtual QString getTmpIniFilePath() const;
+	// When running under sudo, Qt's QSettings replaces the ini with a
+	// root-owned file (write-temp + rename), so later non-root runs can no
+	// longer save preferences. Restore the invoking user's ownership (from
+	// SUDO_UID/SUDO_GID) on the config file and its directory. No-op on Windows
+	// and when not running as root. Best-effort (ignores failures).
+	static void restoreConfigOwnership(const QString & filePath);
 	void init(const QString & iniFilePath = "");
 	void setCurrentPanelToSource();
 	virtual QString getDefaultWorkingDirectory() const;
@@ -173,6 +180,7 @@ public:
 	int getOdomRegistrationApproach() const;
 	double getOdomF2MGravitySigma() const;
 	bool isOdomDisabled() const;
+	bool isOdomAsGuessEnabled() const;
 	bool isOdomSensorAsGt() const;
 	bool isGroundTruthAligned() const;
 
@@ -208,6 +216,7 @@ public:
 	double getCloudMaxDepth(int index) const;  // 0=map, 1=odom
 	double getCloudMinDepth(int index) const;  // 0=map, 1=odom
 	std::vector<float> getCloudRoiRatios(int index) const; // 0=map, 1=odom
+	unsigned char getCloudConfidenceThr(int index) const; // 0=map, 1=odom
 	int getCloudColorScheme(int index) const;   // 0=map, 1=odom
 	double getCloudOpacity(int index) const;   // 0=map, 1=odom
 	int getCloudPointSize(int index) const;    // 0=map, 1=odom
@@ -260,6 +269,9 @@ public:
 	PreferencesDialog::Src getSourceDriver() const;
 	QString getSourceDriverStr() const;
 	QString getSourceDevice() const;
+	// Non-empty warning to show before opening the selected source when init() is expected to be
+	// unusually slow; empty otherwise.
+	QString getSourceInitWarningMsg() const;
 	PreferencesDialog::Src getLidarSourceDriver() const;
 	PreferencesDialog::Src getOdomSourceDriver() const;
 
@@ -278,6 +290,7 @@ public:
 	bool isSourceFeatureDetection() const;
 	bool isSourceStereoDepthGenerated() const;
 	bool isSourceStereoExposureCompensation() const;
+	bool isRightGrayScale() const;
 	bool isSourceScanFromDepth() const;
 	bool isSourceScanDeskewing() const;
 	int getSourceScanDownsampleStep() const;
@@ -289,6 +302,7 @@ public:
 	double getSourceScanForceGroundNormalsUp() const;
 	Transform getSourceLocalTransform() const;    //Openni group
 	Transform getLaserLocalTransform() const; // directory images
+	Transform getGroundTruthLocalTransform() const; // directory images
 	Transform getIMULocalTransform() const; // directory images
 	QString getIMUPath() const;
 	int getIMURate() const;
@@ -359,17 +373,22 @@ private Q_SLOTS:
 	void updateStereoDisparityVisibility();
 	void updateFeatureMatchingVisibility();
 	void updateGlobalDescriptorVisibility();
+	void updateAvailableMarkerDictionaries();
 	void updateOdometryStackedIndex(int index);
 	void useOdomFeatures();
 	void changeWorkingDirectory();
 	void changeDictionaryPath();
 	void changeOdometryORBSLAMVocabulary();
 	void changeOdometryOKVISConfigPath();
-	void changeOdometryVINSConfigPath();
+	void changeOdometryVINSFusionConfigPath();
+	void changeOdometryOpenVINSConfigPath();
+	void changeOdometryLIOSAMConfigPath();
 	void changeOdometryOpenVINSLeftMask();
 	void changeOdometryOpenVINSRightMask();
 	void changeIcpPMConfigPath();
 	void changeSuperPointModelPath();
+	void changeSuperPointRpautratWeightsPath();
+	void changeSuperPointRpautratModelPath();
 	void changePyMatcherPath();
 	void changePyMatcherModel();
 	void changePyDescriptorPath();
@@ -465,6 +484,7 @@ private:
 	QVector<QDoubleSpinBox*> _3dRenderingMaxDepth;
 	QVector<QDoubleSpinBox*> _3dRenderingMinDepth;
 	QVector<QLineEdit*> _3dRenderingRoiRatios;
+	QVector<QSpinBox*> _3dRenderingDepthConfidenceThr;
 	QVector<QSpinBox*> _3dRenderingColorScheme;
 	QVector<QDoubleSpinBox*> _3dRenderingOpacity;
 	QVector<QSpinBox*> _3dRenderingPtSize;

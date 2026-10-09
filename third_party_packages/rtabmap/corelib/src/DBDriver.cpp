@@ -45,7 +45,7 @@ DBDriver * DBDriver::create(const ParametersMap & parameters)
 
 DBDriver::DBDriver(const ParametersMap & parameters) :
 	_emptyTrashesTime(0),
-	_timestampUpdate(true)
+	_timestampUpdate(false)
 {
 	this->parseParameters(parameters);
 }
@@ -73,7 +73,15 @@ void DBDriver::closeConnection(bool save, const std::string & outputUrl)
 	else
 	{
 		_trashesMutex.lock();
+		for(auto & iter: _trashSignatures)
+		{
+			delete iter.second;
+		}
 		_trashSignatures.clear();
+		for(auto & iter: _trashVisualWords)
+		{
+			delete iter.second;
+		}
 		_trashVisualWords.clear();
 		_trashesMutex.unlock();
 	}
@@ -83,12 +91,12 @@ void DBDriver::closeConnection(bool save, const std::string & outputUrl)
 	UDEBUG("");
 }
 
-bool DBDriver::openConnection(const std::string & url, bool overwritten)
+bool DBDriver::openConnection(const std::string & url, bool overwritten, bool readOnly)
 {
 	UDEBUG("");
 	_url = url;
 	_dbSafeAccessMutex.lock();
-	if(this->connectDatabaseQuery(url, overwritten))
+	if(this->connectDatabaseQuery(url, overwritten, readOnly))
 	{
 		_dbSafeAccessMutex.unlock();
 		return true;
@@ -324,7 +332,7 @@ void DBDriver::emptyTrashes(bool async)
 	std::map<int, VisualWord*> visualWords;
 	_trashesMutex.lock();
 	{
-		ULOGGER_DEBUG("signatures=%d, visualWords=%d", _trashSignatures.size(), _trashVisualWords.size());
+		ULOGGER_DEBUG("signatures=%d, visualWords=%d", (int)_trashSignatures.size(), (int)_trashVisualWords.size());
 		signatures = _trashSignatures;
 		visualWords = _trashVisualWords;
 		_trashSignatures.clear();
@@ -383,7 +391,7 @@ void DBDriver::asyncSave(Signature * s)
 {
 	if(s)
 	{
-		UDEBUG("s=%d", s->id());
+		//UDEBUG("s=%d", s->id());
 		_trashesMutex.lock();
 		{
 			_trashSignatures.insert(std::pair<int, Signature*>(s->id(), s));
@@ -512,12 +520,13 @@ void DBDriver::updateCalibration(int nodeId, const std::vector<CameraModel> & mo
 	_dbSafeAccessMutex.unlock();
 }
 
-void DBDriver::updateDepthImage(int nodeId, const cv::Mat & image)
+void DBDriver::updateDepthImage(int nodeId, const cv::Mat & image, const std::string & format)
 {
 	_dbSafeAccessMutex.lock();
 	this->updateDepthImageQuery(
 			nodeId,
-			image);
+			image,
+			format);
 	_dbSafeAccessMutex.unlock();
 }
 
@@ -530,17 +539,17 @@ void DBDriver::updateLaserScan(int nodeId, const LaserScan & scan)
 	_dbSafeAccessMutex.unlock();
 }
 
-void DBDriver::load(VWDictionary * dictionary, bool lastStateOnly) const
+void DBDriver::load(VWDictionary & dictionary, bool lastStateOnly, bool idsOnly) const
 {
 	_dbSafeAccessMutex.lock();
-	this->loadQuery(dictionary, lastStateOnly);
+	this->loadQuery(dictionary, lastStateOnly, idsOnly);
 	_dbSafeAccessMutex.unlock();
 }
 
-void DBDriver::loadLastNodes(std::list<Signature *> & signatures) const
+void DBDriver::loadLastNodes(std::list<Signature *> & signatures, bool loadWordIdsOnly) const
 {
 	_dbSafeAccessMutex.lock();
-	this->loadLastNodesQuery(signatures);
+	this->loadLastNodesQuery(signatures, loadWordIdsOnly);
 	_dbSafeAccessMutex.unlock();
 }
 
@@ -563,7 +572,8 @@ Signature * DBDriver::loadSignature(int id, bool * loadedFromTrash)
 }
 void DBDriver::loadSignatures(const std::list<int> & signIds,
 		std::list<Signature *> & signatures,
-		std::set<int> * loadedFromTrash)
+		std::set<int> * loadedFromTrash,
+		bool loadWordIdsOnly)
 {
 	UDEBUG("");
 	// look up in the trash before the database
@@ -608,7 +618,7 @@ void DBDriver::loadSignatures(const std::list<int> & signIds,
 	if(ids.size())
 	{
 		_dbSafeAccessMutex.lock();
-		this->loadSignaturesQuery(ids, signatures);
+		this->loadSignaturesQuery(ids, signatures, loadWordIdsOnly);
 		_dbSafeAccessMutex.unlock();
 	}
 }
@@ -655,10 +665,10 @@ void DBDriver::loadWords(const std::set<int> & wordIds, std::list<VisualWord *> 
 	}
 }
 
-void DBDriver::loadNodeData(Signature * signature, bool images, bool scan, bool userData, bool occupancyGrid) const
+void DBDriver::loadNodeData(Signature & signature, bool images, bool scan, bool userData, bool occupancyGrid) const
 {
 	std::list<Signature *> signatures;
-	signatures.push_back(signature);
+	signatures.push_back(&signature);
 	this->loadNodeData(signatures, images, scan, userData, occupancyGrid);
 }
 
@@ -697,7 +707,10 @@ void DBDriver::getNodeData(
 			((!images || !s->sensorData().imageCompressed().empty()) &&
 			 (!scan || !s->sensorData().laserScanCompressed().isEmpty()) &&
 			 (!userData || !s->sensorData().userDataCompressed().empty()) &&
-			 (!occupancyGrid || s->sensorData().gridCellSize() != 0.0f))))
+			 (!occupancyGrid ||
+				!s->sensorData().gridGroundCellsCompressed().empty() ||
+				!s->sensorData().gridObstacleCellsCompressed().empty() ||
+				!s->sensorData().gridEmptyCellsCompressed().empty()))))
 		{
 			data = (SensorData)s->sensorData();
 			if(!images)
@@ -822,6 +835,45 @@ bool DBDriver::getNodeInfo(
 	return found;
 }
 
+void DBDriver::getLocalFeatures(
+	int signatureId,
+	std::multimap<int, int> & words,
+	std::vector<cv::KeyPoint> & keypoints,
+	std::vector<cv::Point3f> & points,
+	cv::Mat & descriptors) const
+{
+	bool found = false;
+	// look in the trash
+	_trashesMutex.lock();
+	if(uContains(_trashSignatures, signatureId))
+	{
+		const Signature * s = _trashSignatures.at(signatureId);
+		UASSERT(s != 0);
+		found = true;
+		if(!s->getWords().empty())
+		{
+			words = s->getWords();
+			if(s->getWordsKpts().empty()){
+				found = false; // Force checking the database in case the local features were not loaded in RAM
+			}
+			else
+			{
+				words = s->getWords();
+				keypoints = s->getWordsKpts();
+				points = s->getWords3();
+				descriptors = s->getWordsDescriptors().clone();
+			}
+		}
+	}
+	_trashesMutex.unlock();
+
+	if(!found)
+	{
+		UScopeMutex lock(_dbSafeAccessMutex);
+		getLocalFeaturesQuery(signatureId, words, keypoints, points, descriptors);
+	}
+}
+
 void DBDriver::loadLinks(int signatureId, std::multimap<int, Link> & links, Link::Type type) const
 {
 	bool found = false;
@@ -919,6 +971,45 @@ void DBDriver::getAllNodeIds(std::set<int> & ids, bool ignoreChildren, bool igno
 
 	_dbSafeAccessMutex.lock();
 	this->getAllNodeIdsQuery(ids, ignoreChildren, ignoreBadSignatures, ignoreIntermediateNodes);
+	_dbSafeAccessMutex.unlock();
+}
+
+void DBDriver::getAllOdomPoses(std::map<int, Transform> & poses, bool ignoreChildren, bool ignoreIntermediateNodes) const
+{
+	// look in the trash
+	_trashesMutex.lock();
+	if(_trashSignatures.size())
+	{
+		for(std::map<int, Signature*>::const_iterator sIter = _trashSignatures.begin(); sIter!=_trashSignatures.end(); ++sIter)
+		{
+			bool hasNeighbors = !ignoreChildren;
+			if(ignoreChildren)
+			{
+				for(std::map<int, Link>::const_iterator nIter = sIter->second->getLinks().begin();
+						nIter!=sIter->second->getLinks().end();
+						++nIter)
+				{
+					if(nIter->second.type() == Link::kNeighbor ||
+					   nIter->second.type() == Link::kNeighborMerged)
+					{
+						hasNeighbors = true;
+						break;
+					}
+				}
+			}
+			if(hasNeighbors && (!ignoreIntermediateNodes || sIter->second->getWeight() != -1))
+			{
+				poses.insert(std::make_pair(sIter->first, sIter->second->getPose()));
+			}
+		}
+
+		std::vector<int> keys = uKeys(_trashSignatures);
+
+	}
+	_trashesMutex.unlock();
+
+	_dbSafeAccessMutex.lock();
+	this->getAllOdomPosesQuery(poses, ignoreChildren, ignoreIntermediateNodes);
 	_dbSafeAccessMutex.unlock();
 }
 
@@ -1139,7 +1230,7 @@ void DBDriver::addInfoAfterRun(
 					  << processMemUsed << ","
 					  << databaseMemUsed << ","
 					  << dictionarySize << ","
-					  "\"" << param.c_str() << "\");";
+					  "'" << param.c_str() << "');";
 			}
 			else
 			{
@@ -1149,7 +1240,7 @@ void DBDriver::addInfoAfterRun(
 					  << processMemUsed << ","
 					  << databaseMemUsed << ","
 					  << dictionarySize << ","
-					  "\"" << param.c_str() << "\");";
+					  "'" << param.c_str() << "');";
 			}
 		}
 		else
@@ -1247,6 +1338,13 @@ cv::Mat DBDriver::loadOptimizedMesh(
 	return cloud;
 }
 
+void DBDriver::saveFlannIndex(const std::vector<unsigned char> & indexData) const
+{
+	_dbSafeAccessMutex.lock();
+	saveFlannIndexQuery(indexData);
+	_dbSafeAccessMutex.unlock();
+}
+
 void DBDriver::generateGraph(
 		const std::string & fileName,
 		const std::set<int> & idsInput,
@@ -1273,7 +1371,7 @@ void DBDriver::generateGraph(
 			 if(idsInput.size() == 0)
 			 {
 				 this->getAllNodeIds(ids);
-				 UDEBUG("ids.size()=%d", ids.size());
+				 UDEBUG("ids.size()=%d", (int)ids.size());
 				 for(std::map<int, Signature*>::const_iterator iter=otherSignatures.begin(); iter!=otherSignatures.end(); ++iter)
 				 {
 					 ids.insert(iter->first);
@@ -1287,7 +1385,7 @@ void DBDriver::generateGraph(
 			 const char * colorG = "green";
 			 const char * colorP = "pink";
 			 const char * colorNM = "blue";
-			 UINFO("Generating map with %d locations", ids.size());
+			 UINFO("Generating map with %d locations", (int)ids.size());
 			 fprintf(fout, "digraph G {\n");
 			 for(std::set<int>::iterator i=ids.begin(); i!=ids.end(); ++i)
 			 {

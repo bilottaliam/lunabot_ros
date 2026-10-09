@@ -41,8 +41,6 @@ namespace rtabmap_util
 
 PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) :
 	Node("point_cloud_aggregator", options),
-	warningThread_(0),
-	callbackCalled_(false),
 	exactSync4_(0),
 	approxSync4_(0),
 	exactSync3_(0),
@@ -87,14 +85,14 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 
 	cloudPub_ = create_publisher<sensor_msgs::msg::PointCloud2>("combined_cloud", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qos));
 
-	cloudSub_1_.subscribe(this, "cloud1", rclcpp::QoS(topicQueueSize).reliability((rmw_qos_reliability_policy_t)qos).get_rmw_qos_profile());
-	cloudSub_2_.subscribe(this, "cloud2", rclcpp::QoS(topicQueueSize).reliability((rmw_qos_reliability_policy_t)qos).get_rmw_qos_profile());
+	cloudSub_1_.subscribe(this, "cloud1", RCLCPP_QOS(topicQueueSize, qos));
+	cloudSub_2_.subscribe(this, "cloud2", RCLCPP_QOS(topicQueueSize, qos));
 
 	std::string subscribedTopicsMsg;
 	if(count == 4)
 	{
-		cloudSub_3_.subscribe(this, "cloud3", rclcpp::QoS(topicQueueSize).reliability((rmw_qos_reliability_policy_t)qos).get_rmw_qos_profile());
-		cloudSub_4_.subscribe(this, "cloud4", rclcpp::QoS(topicQueueSize).reliability((rmw_qos_reliability_policy_t)qos).get_rmw_qos_profile());
+		cloudSub_3_.subscribe(this, "cloud3", RCLCPP_QOS(topicQueueSize, qos));
+		cloudSub_4_.subscribe(this, "cloud4", RCLCPP_QOS(topicQueueSize, qos));
 		if(approx)
 		{
 			approxSync4_ = new message_filters::Synchronizer<ApproxSync4Policy>(ApproxSync4Policy(syncQueueSize), cloudSub_1_, cloudSub_2_, cloudSub_3_, cloudSub_4_);
@@ -111,14 +109,14 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 				get_name(),
 				approx?"approx":"exact",
 				approx&&approxSyncMaxInterval!=0.0?uFormat(", max interval=%fs", approxSyncMaxInterval).c_str():"",
-				cloudSub_1_.getTopic().c_str(),
-				cloudSub_2_.getTopic().c_str(),
-				cloudSub_3_.getTopic().c_str(),
-				cloudSub_4_.getTopic().c_str());
+				cloudSub_1_.getSubscriber()->get_topic_name(),
+				cloudSub_2_.getSubscriber()->get_topic_name(),
+				cloudSub_3_.getSubscriber()->get_topic_name(),
+				cloudSub_4_.getSubscriber()->get_topic_name());
 	}
 	else if(count == 3)
 	{
-		cloudSub_3_.subscribe(this, "cloud3", rclcpp::QoS(topicQueueSize).reliability((rmw_qos_reliability_policy_t)qos).get_rmw_qos_profile());
+		cloudSub_3_.subscribe(this, "cloud3", RCLCPP_QOS(topicQueueSize, qos));
 		if(approx)
 		{
 			approxSync3_ = new message_filters::Synchronizer<ApproxSync3Policy>(ApproxSync3Policy(syncQueueSize), cloudSub_1_, cloudSub_2_, cloudSub_3_);
@@ -135,9 +133,9 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 				this->get_name(),
 				approx?"approx":"exact",
 				approx&&approxSyncMaxInterval!=0.0?uFormat(", max interval=%fs", approxSyncMaxInterval).c_str():"",
-				cloudSub_1_.getTopic().c_str(),
-				cloudSub_2_.getTopic().c_str(),
-				cloudSub_3_.getTopic().c_str());
+				cloudSub_1_.getSubscriber()->get_topic_name(),
+				cloudSub_2_.getSubscriber()->get_topic_name(),
+				cloudSub_3_.getSubscriber()->get_topic_name());
 	}
 	else
 	{
@@ -157,28 +155,22 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 				this->get_name(),
 				approx?"approx":"exact",
 				approx&&approxSyncMaxInterval!=0.0?uFormat(", max interval=%fs", approxSyncMaxInterval).c_str():"",
-				cloudSub_1_.getTopic().c_str(),
-				cloudSub_2_.getTopic().c_str());
+				cloudSub_1_.getSubscriber()->get_topic_name(),
+				cloudSub_2_.getSubscriber()->get_topic_name());
 	}
 
 
-	warningThread_ = new std::thread([&](){
-		rclcpp::Rate r(1.0/5.0);
-		while(!callbackCalled_)
-		{
-			r.sleep();
-			if(!callbackCalled_)
-			{
-				RCLCPP_WARN(this->get_logger(), "%s: Did not receive data since 5 seconds! Make sure the input topics are "
-						"published (\"$ ros2 topic hz my_topic\") and the timestamps in their "
-						"header are set. %s%s",
-						this->get_name(),
-						approx?"":"Parameter \"approx_sync\" is false, which means that input "
-							"topics should have all the exact timestamp for the callback to be called.",
-							subscribedTopicsMsg.c_str());
-			}
-		}
-	});
+	syncDiagnostic_.reset(new rtabmap_sync::SyncDiagnostic(this, 0.5));
+	syncDiagnostic_->init(cloudSub_1_.getSubscriber()->get_topic_name(),
+		uFormat("%s: Did not receive data since 5 seconds! Make sure the input topics are "
+				"published (\"$ ros2 topic hz my_topic\") and the timestamps in their "
+				"header are set. %s%s",
+				this->get_name(),
+				approx?"":"Parameter \"approx_sync\" is false, which means that input "
+					"topics should have all the exact timestamp for the callback to be called.",
+				subscribedTopicsMsg.c_str()));
+
+	RCLCPP_INFO(this->get_logger(), "%s", subscribedTopicsMsg.c_str());
 }
 
 PointCloudAggregator::~PointCloudAggregator()
@@ -189,13 +181,6 @@ PointCloudAggregator::~PointCloudAggregator()
 	delete approxSync3_;
 	delete exactSync2_;
 	delete approxSync2_;
-
-	if(warningThread_)
-	{
-		callbackCalled_=true;
-		warningThread_->join();
-		delete warningThread_;
-	}
 }
 
 void PointCloudAggregator::clouds4_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloudMsg_1,
@@ -233,8 +218,8 @@ void PointCloudAggregator::clouds2_callback(const sensor_msgs::msg::PointCloud2:
 }
 void PointCloudAggregator::combineClouds(const std::vector<sensor_msgs::msg::PointCloud2::ConstSharedPtr> & cloudMsgs)
 {
-	callbackCalled_ = true;
 	UASSERT(cloudMsgs.size() > 1);
+	syncDiagnostic_->tickInput(cloudMsgs[0]->header.stamp);
 	if(cloudPub_->get_subscription_count())
 	{
 		pcl::PCLPointCloud2::Ptr output(new pcl::PCLPointCloud2);
@@ -419,6 +404,7 @@ void PointCloudAggregator::combineClouds(const std::vector<sensor_msgs::msg::Poi
 		rosCloud->header.frame_id = frameId;
 		cloudPub_->publish(std::move(rosCloud));
 	}
+	syncDiagnostic_->tickOutput(cloudMsgs[0]->header.stamp);
 }
 }
 

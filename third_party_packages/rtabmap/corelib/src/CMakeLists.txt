@@ -41,11 +41,15 @@ SET(SRC_FILES
     camera/CameraMyntEye.cpp
     camera/CameraDepthAI.cpp
 	camera/CameraSeerSense.cpp
+	camera/CameraOrbbecSDK.cpp
     
     EpipolarGeometry.cpp
     VisualWord.cpp
     VWDictionary.cpp
     BayesFilter.cpp
+    bayes/PredictionModel.cpp
+    bayes/DensePrediction.cpp
+    bayes/SparsePrediction.cpp
     Parameters.cpp
     Signature.cpp
     Features2d.cpp
@@ -64,6 +68,8 @@ SET(SRC_FILES
     util3d_correspondences.cpp
     util3d_motion_estimation.cpp
     
+	rvl_codec.cpp
+	
     SensorData.cpp
     Graph.cpp
     Compression.cpp
@@ -83,6 +89,7 @@ SET(SRC_FILES
     
     Odometry.cpp
     OdometryThread.cpp
+	OdometryInfo.cpp
     odometry/OdometryF2M.cpp
     odometry/OdometryMono.cpp
     odometry/OdometryF2F.cpp
@@ -94,10 +101,12 @@ SET(SRC_FILES
     odometry/OdometryORBSLAM3.cpp
     odometry/OdometryLOAM.cpp
     odometry/OdometryFLOAM.cpp
+    odometry/OdometryLIOSAM.cpp
     odometry/OdometryMSCKF.cpp
-    odometry/OdometryVINS.cpp
+    odometry/OdometryVINSFusion.cpp
     odometry/OdometryOpenVINS.cpp
     odometry/OdometryOpen3D.cpp
+	odometry/OdometryCuVSLAM.cpp
     
     IMU.cpp
     IMUThread.cpp
@@ -125,7 +134,8 @@ SET(SRC_FILES
     rtflann/ext/lz4.c
     rtflann/ext/lz4hc.c
     FlannIndex.cpp
-    
+    nanoflann/NanoFlannIndex.cpp
+
     #clams stuff
     clams/discrete_depth_distortion_model_helpers.cpp
     clams/discrete_depth_distortion_model.cpp
@@ -160,10 +170,6 @@ IF(MSVC)
 ENDIF(MSVC)
 
 SET(INCLUDE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../include
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}/include
 	${ZLIB_INCLUDE_DIRS}
 )
 
@@ -214,11 +220,21 @@ IF(TORCH_FOUND)
 		${SRC_FILES}
 		superpoint_torch/SuperPoint.cc
 	)
-	 SET(INCLUDE_DIRS
+	SET(INCLUDE_DIRS
 	    ${TORCH_INCLUDE_DIRS}
 	    ${CMAKE_CURRENT_SOURCE_DIR}/superpoint_torch
 		${INCLUDE_DIRS}
 	)
+	IF(WITH_PYTHON AND Python3_FOUND)
+		SET(SRC_FILES
+			${SRC_FILES}
+			superpoint_rpautrat/SuperpointRpautrat.cpp
+		)
+		SET(INCLUDE_DIRS
+	    	${CMAKE_CURRENT_SOURCE_DIR}/superpoint_rpautrat
+			${INCLUDE_DIRS}
+		)
+	ENDIF(WITH_PYTHON AND Python3_FOUND)
 ENDIF(TORCH_FOUND)
 
 IF(WITH_PYTHON AND Python3_FOUND)
@@ -380,7 +396,6 @@ IF(depthai_FOUND)
 	SET(PUBLIC_LIBRARIES
 		${PUBLIC_LIBRARIES}
 		depthai::core
-		depthai::opencv
 	)
 ENDIF(depthai_FOUND)
 
@@ -390,6 +405,13 @@ IF(xvsdk_FOUND)
 		${xvsdk_LIBRARIES}
 	)
 ENDIF(xvsdk_FOUND)
+
+IF(OrbbecSDK_FOUND)
+	SET(LIBRARIES
+		${LIBRARIES}
+		ob::OrbbecSDK
+	)
+ENDIF(OrbbecSDK_FOUND)
 
 IF(TARGET OpenMP::OpenMP_CXX)
 	SET(LIBRARIES
@@ -514,6 +536,13 @@ IF(FastCV_FOUND)
 	)
 ENDIF(FastCV_FOUND)
 
+IF(apriltag_FOUND)
+	SET(LIBRARIES
+		apriltag::apriltag
+		${LIBRARIES}
+	)
+ENDIF(apriltag_FOUND)
+
 IF(opengv_FOUND)
     SET(LIBRARIES
         ${LIBRARIES}
@@ -586,6 +615,18 @@ IF(floam_FOUND)
     )
 ENDIF(floam_FOUND)
 
+IF(lio_sam_FOUND)
+    SET(INCLUDE_DIRS
+        ${INCLUDE_DIRS}
+        ${lio_sam_INCLUDE_DIRS}
+    )
+    link_directories(${lio_sam_LIBRARY_DIRS})
+    SET(LIBRARIES
+        ${LIBRARIES}
+        lio_sam_core
+    )
+ENDIF(lio_sam_FOUND)
+
 IF(ZED_FOUND)
 	SET(INCLUDE_DIRS
 		${INCLUDE_DIRS}
@@ -643,21 +684,47 @@ IF(octomap_FOUND)
 ENDIF(octomap_FOUND)
 
 IF(grid_map_core_FOUND)
-    IF(TARGET grid_map_core)
+    IF(TARGET grid_map_core::grid_map_core)
         SET(LIBRARIES
             ${LIBRARIES}
-            grid_map_core
+            grid_map_core::grid_map_core
         )
+        # ${grid_map_core_INCLUDE_DIRS} is only ${EIGEN3_INCLUDE_DIR} on an
+        # ament install; the path to grid_map's own headers lives solely on
+        # the imported target.
+        GET_TARGET_PROPERTY(grid_map_core_PUBLIC_INCLUDE_DIRS
+                            grid_map_core::grid_map_core
+                            INTERFACE_INCLUDE_DIRECTORIES)
     ELSE()
-        SET(INCLUDE_DIRS
-            ${INCLUDE_DIRS}
-            ${grid_map_core_INCLUDE_DIRS}
-        )
+        SET(grid_map_core_PUBLIC_INCLUDE_DIRS ${grid_map_core_INCLUDE_DIRS})
         SET(LIBRARIES
             ${LIBRARIES}
             ${grid_map_core_LIBRARIES}
         )
     ENDIF()
+
+    # grid_map_core links PRIVATE (only global_map/GridMap.cpp includes it),
+    # but its Eigen plugins aren't private: FIND_PACKAGE(grid_map_core) injects
+    # -DEIGEN_FUNCTORS_PLUGIN / -DEIGEN_DENSEBASE_PLUGIN with a directory-scope
+    # ADD_DEFINITIONS, adding members to Eigen::MatrixBase and DenseBase in
+    # every translation unit. grid_map never pairs those with the include
+    # directory holding the headers they name (still true on master), so any
+    # target inheriting them without linking grid_map_core -- corelib/test, for
+    # one -- fails on its first Eigen include.
+    #
+    # Keep the two halves together on the public interface: everything here
+    # reaches Eigen through rtabmap_core, and installed consumers then get an
+    # Eigen matching the one rtabmap_core was built with.
+    SET(PUBLIC_INCLUDE_DIRS
+        ${PUBLIC_INCLUDE_DIRS}
+        ${grid_map_core_PUBLIC_INCLUDE_DIRS}
+    )
+    SET(PUBLIC_DEFINITIONS
+        ${PUBLIC_DEFINITIONS}
+        "EIGEN_FUNCTORS_PLUGIN=\"${EIGEN_FUNCTORS_PLUGIN_PATH}\""
+        "EIGEN_DENSEBASE_PLUGIN=\"${EIGEN_DENSEBASE_PLUGIN_PATH}\""
+    )
+
 	SET(SRC_FILES
     	${SRC_FILES}
 		global_map/GridMap.cpp
@@ -743,16 +810,16 @@ IF(vins_FOUND)
 	)
 ENDIF(vins_FOUND)
 
-IF(ov_msckf_FOUND)
+IF(OpenVINS_FOUND)
     SET(INCLUDE_DIRS
-		${ov_msckf_INCLUDE_DIRS}
+		${OpenVINS_INCLUDE_DIRS}
 		${INCLUDE_DIRS}
 	)
 	SET(LIBRARIES
-		${ov_msckf_LIBRARIES}
+		${OpenVINS_LIBRARIES}
 		${LIBRARIES}
 	)
-ENDIF(ov_msckf_FOUND)
+ENDIF(OpenVINS_FOUND)
 
 IF(ORB_SLAM_FOUND)
     SET(INCLUDE_DIRS
@@ -765,38 +832,18 @@ IF(ORB_SLAM_FOUND)
 	)
 ENDIF(ORB_SLAM_FOUND)
 
-IF(GTSAM_FOUND)
-	# Make sure GTSAM is built with system Eigen, not the included one in its package
-	IF(GTSAM_INCLUDE_DIR)
-		SET(INCLUDE_DIRS 
-			${INCLUDE_DIRS} 
-			${GTSAM_INCLUDE_DIR} 
-		)
-	ELSE()
-		SET(INCLUDE_DIRS 
-			${INCLUDE_DIRS} 
-			${GTSAM_INCLUDE_DIRS}
-		)
-	ENDIF()
-	SET(SRC_FILES
-    	${SRC_FILES}
-		optimizer/gtsam/GravityFactor.cpp
+IF(CUVSLAM_FOUND)
+    SET(LIBRARIES
+		${LIBRARIES}
+		cuvslam::cuvslam
 	)
-	IF(WIN32)
-		# GTSAM should be built in STATIC on Windows to avoid "error C2338: THIS_METHOD_IS_ONLY_FOR_1x1_EXPRESSIONS" when building GTSAM
-		add_definitions("-DGTSAM_IMPORT_STATIC") 
-	ENDIF(WIN32)
+ENDIF(CUVSLAM_FOUND)
+
+IF(GTSAM_FOUND)
 	SET(LIBRARIES
 		${LIBRARIES}
-		gtsam # Windows: Place static libs at the end
+		gtsam
 	)
-	IF(WIN32)
-		#explicitly add metis target on windows (after gtsam target)
-		SET(LIBRARIES
-			${LIBRARIES}
-			metis
-		)
-	ENDIF(WIN32)
 ENDIF(GTSAM_FOUND)
 
 IF(WITH_MADGWICK)
@@ -813,6 +860,8 @@ CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/resources/DatabaseSchema.sql.in ${CMA
 
 SET(RESOURCES
 	${CMAKE_CURRENT_SOURCE_DIR}/resources/DatabaseSchema.sql
+	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_22_0.sql
+	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_20_0.sql
 	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_18_3.sql
 	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_18_0.sql
 	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_17_0.sql
@@ -820,6 +869,13 @@ SET(RESOURCES
 	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_16_1.sql
 	${CMAKE_CURRENT_SOURCE_DIR}/resources/backward_compatibility/DatabaseSchema_0_16_0.sql
 )
+
+IF(TORCH_FOUND AND WITH_PYTHON AND Python3_FOUND)
+	SET(RESOURCES
+		${RESOURCES}
+		${CMAKE_CURRENT_SOURCE_DIR}/superpoint_rpautrat/superpoint_to_torchscript.py
+	)
+ENDIF()
 
 foreach(arg ${RESOURCES})
    get_filename_component(filename ${arg} NAME)
@@ -846,6 +902,14 @@ add_definitions(${PCL_DEFINITIONS})
 
 # Add binary that is built from the source file "main.cpp".
 # The extension is automatically found.
+# rtflann's config.h is generated, as it is upstream, so that the
+# FLANN_KDTREE_MEM_OPT option travels in a header instead of a compile
+# definition: toggling it then recompiles the sources including rtflann rather
+# than every object file of the library (see the header for the details).
+configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtflann/config.h.in
+        ${CMAKE_CURRENT_BINARY_DIR}/rtflann/config.h)
+
 ADD_LIBRARY(rtabmap_core ${SRC_FILES} ${RESOURCES_HEADERS})
 ADD_LIBRARY(rtabmap::core ALIAS rtabmap_core)
 
@@ -853,10 +917,58 @@ generate_export_header(rtabmap_core
  DEPRECATED_MACRO_NAME RTABMAP_DEPRECATED)
 
 target_include_directories(rtabmap_core PUBLIC 
-  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include;${CMAKE_CURRENT_BINARY_DIR}/include;${PUBLIC_INCLUDE_DIRS};${INCLUDE_DIRS}>"
-  "$<INSTALL_INTERFACE:${INSTALL_INCLUDE_DIR};${PUBLIC_INCLUDE_DIRS}>")
-  
-TARGET_LINK_LIBRARIES(rtabmap_core 
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR};${CMAKE_CURRENT_SOURCE_DIR}/../include;${CMAKE_CURRENT_BINARY_DIR};${CMAKE_CURRENT_BINARY_DIR}/include>"
+  "$<INSTALL_INTERFACE:${INSTALL_INCLUDE_DIR}>")
+
+target_include_directories(rtabmap_core SYSTEM PUBLIC
+  "$<BUILD_INTERFACE:${PUBLIC_INCLUDE_DIRS};${INCLUDE_DIRS}>"
+  "$<INSTALL_INTERFACE:${PUBLIC_INCLUDE_DIRS}>")
+
+# Definitions that change how a dependency's headers compile, so consumers of
+# rtabmap_core's headers have to see them too (see grid_map_core above).
+IF(PUBLIC_DEFINITIONS)
+  target_compile_definitions(rtabmap_core PUBLIC ${PUBLIC_DEFINITIONS})
+ENDIF()
+
+# GCC 12 false positives from PCL/Eigen template instantiations (SSE codepath
+# unaligned-loads 16 bytes from a 3-element Eigen vector). Eigen knows the
+# over-read is safe; GCC 12 doesn't. Fixed in GCC 13. PCL itself doesn't
+# trigger this in its own build because the offending code is in templated
+# headers and only fires in downstream TUs. Same scope/approach as
+# pybind11 PR #5355.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+    target_compile_options(rtabmap_core PRIVATE -Wno-array-bounds -Wno-stringop-overread)
+
+    # GCC 12 -Wuse-after-free false positive on the vendored TORO library's
+    # reference-counted DMatrix destructor: when multiple ~DMatrix<double>()
+    # inline at the same closing brace, GCC's cross-call flow analysis can't
+    # prove the freed and re-read 'shares' pointers belong to different
+    # objects. Scope to the TORO sources only.
+    if(WITH_TORO)
+        set_source_files_properties(
+            optimizer/toro3d/posegraph3.cpp
+            optimizer/toro3d/treeoptimizer3_iteration.cpp
+            optimizer/toro3d/treeoptimizer3.cpp
+            optimizer/toro3d/posegraph2.cpp
+            optimizer/toro3d/treeoptimizer2.cpp
+            PROPERTIES COMPILE_OPTIONS "-Wno-use-after-free")
+    endif()
+
+    # GCC 12 -Wmaybe-uninitialized false positive: Eigen's SSE codepath
+    # _mm_loadu_pd's an uninitialized-by-design Eigen::Matrix<double,3,3>
+    # inside g2o::SBACam. GCC follows the SIMD load through and flags it as
+    # potentially uninitialized; Eigen relies on the caller to assign before
+    # reading. Only OptimizerG2O.cpp instantiates SBACam.
+    if(G2O_FOUND)
+        set_source_files_properties(
+            optimizer/OptimizerG2O.cpp
+            PROPERTIES COMPILE_OPTIONS "-Wno-maybe-uninitialized")
+    endif()
+endif()
+
+TARGET_LINK_LIBRARIES(rtabmap_core
   PUBLIC 
     rtabmap_utilite 
     ${PUBLIC_LIBRARIES}

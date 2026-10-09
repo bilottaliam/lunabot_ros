@@ -10,6 +10,16 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+  # issues #1285 #1288 (best-effort probes: not REQUIRED, a phantom miss under
+  # emulated arm64 should not fail the build)
+  find_library(
+    rcutils_LIB NAMES rcutils
+    PATHS "/opt/ros/$ENV{ROS_DISTRO}/lib"
+    NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH
+  )
+endif()
+
 ##################
 ## Dependencies ##
 ##################

@@ -31,6 +31,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UMath.h>
 #include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/utilite/UTimer.h>
+#include <algorithm>
+#include <rtabmap/core/util3d.h>
+#include <rtabmap/core/util3d_transforms.h>
 #include <set>
 
 #include <rtabmap/core/optimizer/OptimizerGTSAM.h>
@@ -38,22 +41,30 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifdef RTABMAP_GTSAM
 #include <gtsam/geometry/Pose2.h>
 #include <gtsam/geometry/Pose3.h>
+#include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/geometry/Cal3_S2Stereo.h>
+#include <gtsam/geometry/StereoPoint2.h>
 #include <gtsam/inference/Key.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/slam/ProjectionFactor.h>
+#include <gtsam/slam/StereoFactor.h>
 #include <gtsam/sam/BearingFactor.h>
 #include <gtsam/sam/BearingRangeFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/GaussNewtonOptimizer.h>
 #include <gtsam/nonlinear/DoglegOptimizer.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/linear/PCGSolver.h>
+#include <gtsam/linear/Preconditioner.h>
 #include <gtsam/nonlinear/NonlinearOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
 #include <gtsam/nonlinear/Values.h>
-#include "gtsam/GravityFactor.h"
+#include <gtsam/navigation/AttitudeFactor.h>
 #include <optimizer/gtsam/XYFactor.h>
 #include <optimizer/gtsam/XYZFactor.h>
+#include <optimizer/gtsam/PlanarBodyZFactor.h>
 #include <gtsam/nonlinear/ISAM2.h>
 
 #ifdef RTABMAP_VERTIGO
@@ -67,6 +78,10 @@ namespace rtabmap {
 OptimizerGTSAM::OptimizerGTSAM(const ParametersMap & parameters) :
 	Optimizer(parameters),
 	internalOptimizerType_(Parameters::defaultGTSAMOptimizer()),
+	pixelVariance_(Parameters::defaultOptimizerPixelVariance()),
+	disparityVariance_(Parameters::defaultOptimizerDisparityVariance()),
+	robustKernelDelta_(Parameters::defaultOptimizerRobustKernelDelta()),
+	baseline_(Parameters::defaultOptimizerBaseline()),
 	isam2_(0),
 	lastSwitchId_(1000000000)
 {
@@ -95,6 +110,13 @@ void OptimizerGTSAM::parseParameters(const ParametersMap & parameters)
 	Optimizer::parseParameters(parameters);
 #ifdef RTABMAP_GTSAM
 	Parameters::parse(parameters, Parameters::kGTSAMOptimizer(), internalOptimizerType_);
+	Parameters::parse(parameters, Parameters::kOptimizerPixelVariance(), pixelVariance_);
+	Parameters::parse(parameters, Parameters::kOptimizerDisparityVariance(), disparityVariance_);
+	Parameters::parse(parameters, Parameters::kOptimizerRobustKernelDelta(), robustKernelDelta_);
+	Parameters::parse(parameters, Parameters::kOptimizerBaseline(), baseline_);
+	UASSERT(pixelVariance_ > 0.0);
+	UASSERT(disparityVariance_ > 0.0);
+	UASSERT(baseline_ >= 0.0);
 
 	bool incremental = isam2_;
 	double threshold = Parameters::defaultGTSAMIncRelinearizeThreshold();
@@ -121,7 +143,7 @@ void OptimizerGTSAM::parseParameters(const ParametersMap & parameters)
 		params.relinearizeThreshold = threshold;
 		params.relinearizeSkip = skip;
 		params.evaluateNonlinearError = true;
-		isam2_ = new ISAM2(params);
+		isam2_ = new gtsam::ISAM2(params);
 
 		addedPoses_.clear();
 		lastAddedConstraints_.clear();
@@ -209,7 +231,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 			UDEBUG("hasGPSPrior=%s", hasGPSPrior?"true":"false");
 			if(isSlam2d())
 			{
-				gtsam::noiseModel::Diagonal::shared_ptr priorNoise = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector3(0.01, 0.01, hasGPSPrior?1e-2:std::numeric_limits<double>::min()));
+				gtsam::noiseModel::Diagonal::shared_ptr priorNoise = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector3(0.01, 0.01, hasGPSPrior?1e-2:1e-9));
 				graph.add(gtsam::PriorFactor<gtsam::Pose2>(rootId, gtsam::Pose2(initialPose.x(), initialPose.y(), initialPose.theta()), priorNoise));
 				addedPrior.push_back(ConstraintToFactor(rootId, rootId, -1));
 			}
@@ -217,7 +239,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 			{
 				gtsam::noiseModel::Diagonal::shared_ptr priorNoise = gtsam::noiseModel::Diagonal::Variances(
 						(gtsam::Vector(6) <<
-								(hasGravityConstraints?2:1e-2), (hasGravityConstraints?2:1e-2), (hasGPSPrior?1e-2:std::numeric_limits<double>::min()), // roll, pitch, fixed yaw if there are no priors
+								(hasGravityConstraints?2:1e-2), (hasGravityConstraints?2:1e-2), (hasGPSPrior?1e-2:1e-9), // roll, pitch, fixed yaw if there are no priors
 								(hasGPSPrior?2:1e-2), hasGPSPrior?2:1e-2, hasGPSPrior?2:1e-2 // xyz
 								).finished());
 				graph.add(gtsam::PriorFactor<gtsam::Pose3>(rootId, gtsam::Pose3(initialPose.toEigen4d()), priorNoise));
@@ -239,6 +261,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 					isam2_ = new gtsam::ISAM2(params);
 					addedPoses_.clear();
 					lastAddedConstraints_.clear();
+					isLandmarkWithRotation_.clear();
 					lastRootFactorIndex_.first = 0;
 					lastSwitchId_ = 1000000000;
 				}
@@ -308,7 +331,13 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 		UDEBUG("fill poses to gtsam... rootId=%d (priorsIgnored=%d landmarksIgnored=%d)",
 				rootId, priorsIgnored()?1:0, landmarksIgnored()?1:0);
 		gtsam::Values initialEstimate;
-		std::map<int, bool> isLandmarkWithRotation;
+		// In batch (non-iSAM2) mode each optimize() call is independent.
+		// In iSAM2 mode the map persists so we can resolve landmarks added
+		// in a previous incremental call but referenced by a new edge.
+		if(!isam2_)
+		{
+			isLandmarkWithRotation_.clear();
+		}
 		for(std::map<int, Transform>::const_iterator iter = newPoses.begin(); iter!=newPoses.end(); ++iter)
 		{
 			UASSERT(!iter->second.isNull());
@@ -328,12 +357,12 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 					if (1 / static_cast<double>(jter->second.infMatrix().at<double>(5,5)) >= 9999.0)
 					{
 						initialEstimate.insert(iter->first, gtsam::Point2(iter->second.x(), iter->second.y()));
-						isLandmarkWithRotation.insert(std::make_pair(iter->first, false));
+						isLandmarkWithRotation_.insert(std::make_pair(iter->first, false));
 					}
 					else
 					{
 						initialEstimate.insert(iter->first, gtsam::Pose2(iter->second.x(), iter->second.y(), iter->second.theta()));
-						isLandmarkWithRotation.insert(std::make_pair(iter->first, true));
+						isLandmarkWithRotation_.insert(std::make_pair(iter->first, true));
 					}
 					addedPoses_.insert(iter->first);
 				}
@@ -357,12 +386,12 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 						1 / static_cast<double>(jter->second.infMatrix().at<double>(5,5)) >= 9999.0)
 					{
 						initialEstimate.insert(iter->first, gtsam::Point3(iter->second.x(), iter->second.y(), iter->second.z()));
-						isLandmarkWithRotation.insert(std::make_pair(iter->first, false));
+						isLandmarkWithRotation_.insert(std::make_pair(iter->first, false));
 					}
 					else
 					{
 						initialEstimate.insert(iter->first, gtsam::Pose3(iter->second.toEigen4d()));
-						isLandmarkWithRotation.insert(std::make_pair(iter->first, true));
+						isLandmarkWithRotation_.insert(std::make_pair(iter->first, true));
 					}
 					addedPoses_.insert(iter->first);
 				}
@@ -379,8 +408,8 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 			int id1 = iter->second.from();
 			int id2 = iter->second.to();
 
-            UASSERT_MSG(poses.find(id1)!=poses.end(), uFormat("id1=%d", id1).c_str());
-            UASSERT_MSG(poses.find(id2)!=poses.end(), uFormat("id2=%d", id2).c_str());
+            UASSERT_MSG(poses.find(id1)!=poses.end(), uFormat("id1=%d for constraint %d->%d (type=%d)", id1, id1, id2, iter->second.type()).c_str());
+            UASSERT_MSG(poses.find(id2)!=poses.end(), uFormat("id2=%d for constraint %d->%d (type=%d)", id2, id1, id2, iter->second.type()).c_str());
 
 			UASSERT(!iter->second.transform().isNull());
 			if(id1 == id2)
@@ -390,9 +419,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 				{
 					if(isSlam2d())
 					{
-						if(id1 < 0 && !isLandmarkWithRotation.at(id1))
+						if(id1 < 0 && !isLandmarkWithRotation_.at(id1))
 						{
-							noiseModel::Diagonal::shared_ptr model = noiseModel::Diagonal::Variances(Vector2(
+							gtsam::noiseModel::Diagonal::shared_ptr model = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector2(
 									1/iter->second.infMatrix().at<double>(0,0),
 									1/iter->second.infMatrix().at<double>(1,1)));
 							graph.add(XYFactor<gtsam::Point2>(id1, gtsam::Point2(iter->second.transform().x(), iter->second.transform().y()), model));
@@ -400,7 +429,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 						}
 						else if (1 / static_cast<double>(iter->second.infMatrix().at<double>(5,5)) >= 9999.0)
 						{
-							noiseModel::Diagonal::shared_ptr model = noiseModel::Diagonal::Variances(Vector2(
+							gtsam::noiseModel::Diagonal::shared_ptr model = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector2(
 									1/iter->second.infMatrix().at<double>(0,0),
 									1/iter->second.infMatrix().at<double>(1,1)));
 							graph.add(XYFactor<gtsam::Pose2>(id1, gtsam::Point2(iter->second.transform().x(), iter->second.transform().y()), model));
@@ -429,9 +458,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 					}
 					else
 					{
-						if(id1 < 0 && !isLandmarkWithRotation.at(id1))
+						if(id1 < 0 && !isLandmarkWithRotation_.at(id1))
 						{
-							noiseModel::Diagonal::shared_ptr model = noiseModel::Diagonal::Precisions(Vector3(
+							gtsam::noiseModel::Diagonal::shared_ptr model = gtsam::noiseModel::Diagonal::Precisions(gtsam::Vector3(
 										iter->second.infMatrix().at<double>(0,0),
 										iter->second.infMatrix().at<double>(1,1),
 										iter->second.infMatrix().at<double>(2,2)));
@@ -442,7 +471,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 							1 / static_cast<double>(iter->second.infMatrix().at<double>(4,4)) >= 9999.0 ||
 							1 / static_cast<double>(iter->second.infMatrix().at<double>(5,5)) >= 9999.0)
 						{
-							noiseModel::Diagonal::shared_ptr model = noiseModel::Diagonal::Precisions(Vector3(
+							gtsam::noiseModel::Diagonal::shared_ptr model = gtsam::noiseModel::Diagonal::Precisions(gtsam::Vector3(
 										iter->second.infMatrix().at<double>(0,0),
 										iter->second.infMatrix().at<double>(1,1),
 										iter->second.infMatrix().at<double>(2,2)));
@@ -471,10 +500,15 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 				}
 				else if(!isSlam2d() && gravitySigma() > 0 && iter->second.type() == Link::kGravity && newPoses.find(iter->first) != newPoses.end())
 				{
-					Vector3 r = gtsam::Pose3(iter->second.transform().toEigen4d()).rotation().xyz();
-					gtsam::Unit3 nG = gtsam::Rot3::RzRyRx(r.x(), r.y(), 0).rotate(gtsam::Unit3(0,0,-1));
-					gtsam::SharedNoiseModel model = gtsam::noiseModel::Isotropic::Sigmas(gtsam::Vector2(gravitySigma(), gravitySigma()));
-					graph.add(Pose3GravityFactor(iter->first, nG, model, Unit3(0,0,1)));
+					gtsam::Rot3 nRbMeas = gtsam::Pose3(iter->second.transform().toEigen4d()).rotation();
+					gtsam::Unit3 nZ(0,0,1);
+					gtsam::Unit3 bGMeas = nRbMeas.unrotate(nZ);
+					gtsam::SharedNoiseModel model = gtsam::noiseModel::Isotropic::Sigma(2, gravitySigma());
+#ifndef RTABMAP_GTSAM_HAS_ATTITUDE_FACTOR_TEMPLATE
+					graph.add(gtsam::Pose3AttitudeFactor(iter->first, nZ, model, bGMeas));
+#else
+					graph.add(gtsam::AttitudeFactor<gtsam::Pose3>(iter->first, nZ, model, bGMeas));
+#endif
 					lastAddedConstraints_.push_back(ConstraintToFactor(iter->first, iter->first, -1));
 				}
 			}
@@ -494,9 +528,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 						t = iter->second.transform().inverse();
 						std::swap(id1, id2); // should be node -> landmark
 					}
-
+					UASSERT(isLandmarkWithRotation_.find(id2) != isLandmarkWithRotation_.end());
 #ifdef RTABMAP_VERTIGO
-					if(this->isRobust() && isLandmarkWithRotation.at(id2))
+					if(this->isRobust() && isLandmarkWithRotation_.at(id2))
 					{
 						// create new switch variable
 						// Sunderhauf IROS 2012:
@@ -514,7 +548,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 						gtsam::noiseModel::Diagonal::shared_ptr switchPriorModel = gtsam::noiseModel::Diagonal::Sigmas(gtsam::Vector1(1.0));
 						graph.add(gtsam::PriorFactor<vertigo::SwitchVariableLinear> (gtsam::Symbol('s',lastSwitchId_), vertigo::SwitchVariableLinear(prior), switchPriorModel));
 					}
-					else if(this->isRobust() && !isLandmarkWithRotation.at(id2))
+					else if(this->isRobust() && !isLandmarkWithRotation_.at(id2))
 					{
 						UWARN("%s cannot be used for landmark constraints without orientation.", Parameters::kOptimizerRobust().c_str());
 					}
@@ -522,7 +556,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 
 					if(isSlam2d())
 					{
-						if(isLandmarkWithRotation.at(id2))
+						if(isLandmarkWithRotation_.at(id2))
 						{
 							Eigen::Matrix<double, 3, 3> information = Eigen::Matrix<double, 3, 3>::Identity();
 							if(!isCovarianceIgnored())
@@ -585,7 +619,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 					}
 					else
 					{
-						if(isLandmarkWithRotation.at(id2))
+						if(isLandmarkWithRotation_.at(id2))
 						{
 							Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity();
 							if(!isCovarianceIgnored())
@@ -783,7 +817,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 			{
 				float x,y,z,roll,pitch,yaw;
 				std::map<int, Transform> tmpPoses;
-				const Values values = isam2_?isam2_->calculateEstimate():optimizer->values();
+				const gtsam::Values values = isam2_?isam2_->calculateEstimate():optimizer->values();
 #if GTSAM_VERSION_NUMERIC >= 40200
 				for(gtsam::Values::deref_iterator iter=values.begin(); iter!=values.end(); ++iter)
 #else
@@ -800,9 +834,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 								gtsam::Pose2 p = iter->value.cast<gtsam::Pose2>();
 								tmpPoses.insert(std::make_pair(key, Transform(p.x(), p.y(), p.theta())));
 							}
-							else if(!landmarksIgnored() && isLandmarkWithRotation.find(key)!=isLandmarkWithRotation.end())
+							else if(!landmarksIgnored() && isLandmarkWithRotation_.find(key)!=isLandmarkWithRotation_.end())
 							{
-								if(isLandmarkWithRotation.at(key))
+								if(isLandmarkWithRotation_.at(key))
 								{
 									newPoses.at(key).getTranslationAndEulerAngles(x,y,z,roll,pitch,yaw);
 									gtsam::Pose2 p = iter->value.cast<gtsam::Pose2>();
@@ -823,9 +857,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 								gtsam::Pose3 p = iter->value.cast<gtsam::Pose3>();
 								tmpPoses.insert(std::make_pair(key, Transform::fromEigen4d(p.matrix())));
 							}
-							else if(!landmarksIgnored() && isLandmarkWithRotation.find(key)!=isLandmarkWithRotation.end())
+							else if(!landmarksIgnored() && isLandmarkWithRotation_.find(key)!=isLandmarkWithRotation_.end())
 							{
-								if(isLandmarkWithRotation.at(key))
+								if(isLandmarkWithRotation_.at(key))
 								{
 									gtsam::Pose3 p = iter->value.cast<gtsam::Pose3>();
 									tmpPoses.insert(std::make_pair(key, Transform::fromEigen4d(p.matrix())));
@@ -924,22 +958,42 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 			// early stop condition
 			UDEBUG("iteration %d error =%f", i+1, error);
 			double errorDelta = lastError - error;
-			if((isam2_ || i>0) && errorDelta < this->epsilon())
+			if(this->epsilon() > 0.0 && fabs(error) > 1000000000000.0)
 			{
-				if(errorDelta < 0)
-				{
-					UDEBUG("Negative improvement?! Ignore and continue optimizing... (%f < %f)", errorDelta, this->epsilon());
-				}
-				else
-				{
-					UDEBUG("Stop optimizing, not enough improvement (%f < %f)", errorDelta, this->epsilon());
-					break;
-				}
+				UWARN("Error computed (%e) is very huge and/or diverging! Aborting! "
+					   "Set %s to 0 to ignore that check and keep iterating up to %s (%d).",
+					   error,
+					   Parameters::kOptimizerEpsilon().c_str(),
+					   Parameters::kOptimizerIterations().c_str(),
+					   this->iterations());
+				return optimizedPoses;
 			}
-			else if(i==0 && error < this->epsilon())
+			else
 			{
-				UINFO("Stop optimizing, error is already under epsilon (%f < %f)", error, this->epsilon());
-				break;
+				if((isam2_ || i>0) && errorDelta < this->epsilon())
+				{
+					if(errorDelta < 0)
+					{
+						UDEBUG("Negative improvement?! Ignore and continue optimizing... (%f < %f)", errorDelta, this->epsilon());
+					}
+					else
+					{
+						UDEBUG("Stop optimizing, not enough improvement (%f < %f)", errorDelta, this->epsilon());
+						break;
+					}
+				}
+				else if(i==0)
+				{ 
+					if(error < 0)
+					{
+						UDEBUG("Negative error?! Ignore and continue optimizing... (%f)", error);
+					}
+					else if(error < this->epsilon())
+					{
+						UINFO("Stop optimizing, error is already under epsilon (%f < %f)", error, this->epsilon());
+						break;
+					}
+				}
 			}
 			lastError = error;
 		}
@@ -973,9 +1027,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 						gtsam::Pose2 p = iter->value.cast<gtsam::Pose2>();
 						optimizedPoses.insert(std::make_pair(key, Transform(p.x(), p.y(), z, roll, pitch, p.theta())));
 					}
-					else if(!landmarksIgnored() && isLandmarkWithRotation.find(key)!=isLandmarkWithRotation.end())
+					else if(!landmarksIgnored() && isLandmarkWithRotation_.find(key)!=isLandmarkWithRotation_.end())
 					{
-						if(isLandmarkWithRotation.at(key))
+						if(isLandmarkWithRotation_.at(key))
 						{
 							poses.at(key).getTranslationAndEulerAngles(x,y,z,roll,pitch,yaw);
 							gtsam::Pose2 p = iter->value.cast<gtsam::Pose2>();
@@ -996,9 +1050,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 						gtsam::Pose3 p = iter->value.cast<gtsam::Pose3>();
 						optimizedPoses.insert(std::make_pair(key, Transform::fromEigen4d(p.matrix())));
 					}
-					else if(!landmarksIgnored() && isLandmarkWithRotation.find(key)!=isLandmarkWithRotation.end())
+					else if(!landmarksIgnored() && isLandmarkWithRotation_.find(key)!=isLandmarkWithRotation_.end())
 					{
-						if(isLandmarkWithRotation.at(key))
+						if(isLandmarkWithRotation_.at(key))
 						{
 							gtsam::Pose3 p = iter->value.cast<gtsam::Pose3>();
 							optimizedPoses.insert(std::make_pair(key, Transform::fromEigen4d(p.matrix())));
@@ -1080,6 +1134,524 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 	UDEBUG("Optimizing graph...end!");
 #else
 	UERROR("Not built with GTSAM support!");
+#endif
+	return optimizedPoses;
+}
+
+// Multi-camera offset: same convention as OptimizerG2O.cpp so per-rig camera
+// vertex keys stay disjoint from pose keys (max 10 cameras per pose).
+#define GTSAM_BA_MULTICAM_OFFSET 10
+
+#ifdef RTABMAP_GTSAM
+// Build a gtsam::Symbol for a 3D point. Word ids can be negative,
+// but gtsam symbol cannot.
+static inline gtsam::Symbol point3dSymbol(int id)
+{
+    return id < 0
+        ? gtsam::Symbol('L', static_cast<std::uint64_t>(-id))
+        : gtsam::Symbol('l', static_cast<std::uint64_t>(id));
+}
+#endif
+
+std::map<int, Transform> OptimizerGTSAM::optimizeBA(
+		int rootId,
+		const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links,
+		const std::map<int, std::vector<CameraModel> > & models,
+		std::map<int, cv::Point3f> & points3DMap,
+		const std::map<int, std::map<int, FeatureBA> > & wordReferences,
+		BAOutliers * outliers)
+{
+	std::map<int, Transform> optimizedPoses;
+	if(outliers)
+	{
+		outliers->clear();
+	}
+#ifdef RTABMAP_GTSAM
+	UDEBUG("Optimizing BA graph...");
+
+	if(!(poses.size() >= 2 && iterations() > 0 && (models.size() == poses.size() || poses.begin()->first < 0)))
+	{
+		UWARN("GTSAM BA: nothing to optimize (poses=%d models=%d iterations=%d)",
+				(int)poses.size(), (int)models.size(), iterations());
+		return optimizedPoses;
+	}
+
+	gtsam::NonlinearFactorGraph graph;
+	gtsam::Values initialEstimate;
+
+	// Cache per-frame, per-camera intrinsics. Note that GTSAM's
+	// GenericProjectionFactor/GenericStereoFactor hold a shared_ptr to the
+	// calibration -- we have to keep these alive for the lifetime of the
+	// graph, hence storing them by map.
+	std::map<std::pair<int,int>, gtsam::Cal3_S2::shared_ptr>       calMono;
+	std::map<std::pair<int,int>, gtsam::Cal3_S2Stereo::shared_ptr> calStereo;
+	std::map<std::pair<int,int>, double>                           baselineByCam;
+
+	// 1) Add pose variables (in CAMERA frame: pose * localTransform).
+	UDEBUG("GTSAM BA: adding %d poses... (rootId=%d)", (int)poses.size(), rootId);
+	for(std::map<int, Transform>::const_iterator iter=poses.begin(); iter!=poses.end(); ++iter)
+	{
+		if(iter->first <= 0)
+		{
+			continue;
+		}
+		std::map<int, std::vector<CameraModel> >::const_iterator iterModel = models.find(iter->first);
+		if(iterModel == models.end() || iterModel->second.empty())
+		{
+			UERROR("GTSAM BA: missing camera model for pose %d", iter->first);
+			return optimizedPoses;
+		}
+		for(size_t i=0; i<iterModel->second.size(); ++i)
+		{
+			const CameraModel & m = iterModel->second[i];
+			if(!m.isValidForProjection())
+			{
+				UERROR("GTSAM BA: model %d.%d is invalid for projection", iter->first, (int)i);
+				return optimizedPoses;
+			}
+			const Transform camPose = iter->second * m.localTransform();
+			if(camPose.isNull())
+			{
+				UERROR("GTSAM BA: null camera pose for %d.%d", iter->first, (int)i);
+				return optimizedPoses;
+			}
+			const gtsam::Symbol xkey('x', iter->first * GTSAM_BA_MULTICAM_OFFSET + (int)i);
+			initialEstimate.insert(xkey, gtsam::Pose3(camPose.toEigen4d()));
+
+			// Intrinsics: skew=0 (no shear in any CameraModel rtabmap supports).
+			gtsam::Cal3_S2::shared_ptr K(new gtsam::Cal3_S2(m.fx(), m.fy(), 0.0, m.cx(), m.cy()));
+			calMono[std::make_pair(iter->first, (int)i)] = K;
+			const double baseline = m.Tx() < 0.0 ? (-m.Tx() / m.fx()) : baseline_;
+			if(baseline > 0.0)
+			{
+				gtsam::Cal3_S2Stereo::shared_ptr Ks(new gtsam::Cal3_S2Stereo(m.fx(), m.fy(), 0.0, m.cx(), m.cy(), baseline));
+				calStereo[std::make_pair(iter->first, (int)i)]     = Ks;
+				baselineByCam[std::make_pair(iter->first, (int)i)] = baseline;
+			}
+
+			// Fix the root pose (or fix everyone else if rootId<0). GTSAM has
+			// no equivalent of g2o's setFixed(); the standard idiom is a
+			// near-zero-sigma prior on each axis. We add this only to the
+			// primary camera (i==0) of a multi-cam rig -- the others are
+			// rigidly linked via the multi-cam BetweenFactors below.
+			const bool fixNode = (rootId >= 0 && iter->first == rootId) ||
+			                     (rootId <  0 && iter->first != -rootId);
+			if(fixNode && i == 0)
+			{
+				gtsam::noiseModel::Diagonal::shared_ptr priorNoise =
+						gtsam::noiseModel::Diagonal::Sigmas(
+								(gtsam::Vector(6) << 1e-9, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9).finished());
+				graph.add(gtsam::PriorFactor<gtsam::Pose3>(xkey, gtsam::Pose3(camPose.toEigen4d()), priorNoise));
+			}
+			else if(isSlam2d() && i == 0)
+			{
+				// 2D / planar BA: lock the body-frame z of each non-root
+				// camera to its initial value (mirrors g2o's EdgeSBACamPrior
+				// with pinfo(2,2) = 1e9). Lateral motion and yaw stay free.
+				const gtsam::Pose3 cam_to_body(m.localTransform().inverse().toEigen4d());
+				gtsam::SharedNoiseModel planarNoise =
+						gtsam::noiseModel::Isotropic::Sigma(1, std::sqrt(1.0 / 1e9));
+				graph.add(PlanarBodyZFactor(xkey, cam_to_body, iter->second.z(), planarNoise));
+			}
+		}
+	}
+
+	// 2) Pose-graph BetweenFactors (same role as the g2o EdgeSBACam edges).
+	//    Expressed in camera frame: cam_from^{-1} * world * cam_to where
+	//    cam = body * localTransform.
+	UDEBUG("GTSAM BA: adding %d links...", (int)links.size());
+	for(std::multimap<int, Link>::const_iterator iter=links.begin(); iter!=links.end(); ++iter)
+	{
+		const Link & link = iter->second;
+		if(link.from() <= 0 || link.to() <= 0)
+		{
+			continue;
+		}
+		if(link.from() == link.to())
+		{
+			continue;
+		}
+		if(!uContains(poses, link.from()) || !uContains(poses, link.to()))
+		{
+			continue;
+		}
+		UASSERT(!link.transform().isNull());
+
+		const Transform camLink = models.at(link.from())[0].localTransform().inverse() *
+		                          link.transform() *
+		                          models.at(link.to())[0].localTransform();
+
+		Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity();
+		if(!isCovarianceIgnored())
+		{
+			memcpy(information.data(), link.infMatrix().data, link.infMatrix().total()*sizeof(double));
+		}
+		// rtabmap's covariance/information convention is [linear|angular];
+		// GTSAM expects [angular|linear]. Swap the blocks.
+		Eigen::Matrix<double, 6, 6> mgtsam;
+		mgtsam.block<3,3>(0,0) = information.block<3,3>(3,3); // rotation
+		mgtsam.block<3,3>(3,3) = information.block<3,3>(0,0); // translation
+		mgtsam.block<3,3>(0,3) = information.block<3,3>(3,0);
+		mgtsam.block<3,3>(3,0) = information.block<3,3>(0,3);
+		gtsam::SharedNoiseModel noise = gtsam::noiseModel::Gaussian::Information(mgtsam);
+
+		graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+				gtsam::Symbol('x', link.from() * GTSAM_BA_MULTICAM_OFFSET),
+				gtsam::Symbol('x', link.to()   * GTSAM_BA_MULTICAM_OFFSET),
+				gtsam::Pose3(camLink.toEigen4d()),
+				noise));
+	}
+
+	// 3) Hard rigid edges between camera 0 and the other cameras of a
+	//    multi-cam rig (g2o uses Identity*1e7; we mirror that here).
+	for(std::map<int, std::vector<CameraModel> >::const_iterator iter=models.begin(); iter!=models.end(); ++iter)
+	{
+		if(!uContains(poses, iter->first))
+		{
+			continue;
+		}
+		for(size_t i=1; i<iter->second.size(); ++i)
+		{
+			const Transform camLink = iter->second[0].localTransform().inverse() * iter->second[i].localTransform();
+			Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity() * 9999999.0;
+			gtsam::SharedNoiseModel noise = gtsam::noiseModel::Gaussian::Information(information);
+			graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+					gtsam::Symbol('x',  iter->first * GTSAM_BA_MULTICAM_OFFSET),
+					gtsam::Symbol('x',  iter->first * GTSAM_BA_MULTICAM_OFFSET + (int)i),
+					gtsam::Pose3(camLink.toEigen4d()),
+					noise));
+		}
+	}
+
+	// 4) 3D points + reprojection observations.
+	//
+	// Every landmark gets an explicit Point3 variable and one factor per
+	// observation, mono and stereo alike, matching g2o and Ceres. The GTSAM-native
+	// choice for mono would be a SmartProjectionPoseFactor, but it marginalizes
+	// the point out of the graph: no per-observation residual to threshold, and
+	// its readback triangulation is a plain DLT one gross outlier drags off by
+	// metres.
+	UDEBUG("GTSAM BA: adding %d 3D points and observations...", (int)points3DMap.size());
+
+	// Maps each observation factor back to its <word, pose> for the sweep below.
+	struct ObsFactor
+	{
+		size_t factorIndex;
+		int wordId;
+		int poseId;
+	};
+	std::vector<ObsFactor> obsFactors;
+	std::set<gtsam::Key> insertedPoints;
+
+	// Build the per-axis noise models once (loop-invariant). Stereo: per-axis
+	// sigmas matching the g2o stereo path. StereoPoint2 is (uL, uR, v); uR =
+	// uL - disparity. uL and v carry pixel-detector noise, uR carries
+	// disparity-channel noise (matches the g2o stereo edge's (u, v, u-disp)
+	// interpretation up to a covariance rotation that is fine for typical
+	// small sigmas). The robust-Huber wrapping is also invariant.
+	const double sigmaPixel     = std::sqrt(pixelVariance_);
+	const double sigmaDisparity = std::sqrt(disparityVariance_);
+	gtsam::SharedNoiseModel stereoNoiseModel = gtsam::noiseModel::Diagonal::Sigmas(
+			(gtsam::Vector(3) << sigmaPixel, sigmaDisparity, sigmaPixel).finished());
+	gtsam::SharedNoiseModel monoNoiseModel =
+			gtsam::noiseModel::Isotropic::Sigma(2, sigmaPixel);
+	if(robustKernelDelta_ > 0.0)
+	{
+		// Huber reads delta in |r| units but Optimizer/RobustKernelDelta is a chi^2
+		// threshold, so the knee deliberately sits above the rejection threshold: pass 1
+		// then only caps gross outliers, which keeps its estimate a good basis for
+		// deciding what to reject. Matching them throttles legitimate noise and costs
+		// accuracy on weakly constrained far points.
+		gtsam::noiseModel::mEstimator::Base::shared_ptr huber =
+				gtsam::noiseModel::mEstimator::Huber::Create(robustKernelDelta_);
+		stereoNoiseModel = gtsam::noiseModel::Robust::Create(huber, stereoNoiseModel);
+		monoNoiseModel   = gtsam::noiseModel::Robust::Create(huber, monoNoiseModel);
+	}
+
+	// Pose variables, priors and links are identical in both passes; only the
+	// landmark part is rebuilt once observations are rejected.
+	const gtsam::NonlinearFactorGraph poseGraph = graph;
+	const gtsam::Values poseValues = initialEstimate;
+
+	// Adds every landmark and observation except those in `excluded`. A landmark
+	// with none left is dropped rather than added unconstrained, so readback keeps
+	// the caller's input estimate -- what a fully rejected point has to keep.
+	auto addLandmarks = [&](const BAOutliers & excluded)
+	{
+	obsFactors.clear();
+	insertedPoints.clear();
+	for(std::map<int, std::map<int, FeatureBA> >::const_iterator iter = wordReferences.begin(); iter!=wordReferences.end(); ++iter)
+	{
+		const int wordId = iter->first;
+		if(points3DMap.find(wordId) == points3DMap.end())
+		{
+			continue;
+		}
+		const cv::Point3f pt3d = points3DMap.at(wordId);
+		if(!util3d::isFinite(pt3d))
+		{
+			UWARN("Ignoring 3D point %d because it has nan value(s)!", wordId);
+			continue;
+		}
+
+		BAOutliers::const_iterator excludedIter = excluded.find(wordId);
+
+		// Collect usable observations first: none left means no variable at all.
+		std::vector<std::map<int, FeatureBA>::const_iterator> kept;
+		for(std::map<int, FeatureBA>::const_iterator jter = iter->second.begin(); jter != iter->second.end(); ++jter)
+		{
+			const int poseId = jter->first;
+			const std::pair<int,int> camKey(poseId, jter->second.cameraIndex);
+			const gtsam::Symbol xkey('x', poseId * GTSAM_BA_MULTICAM_OFFSET + jter->second.cameraIndex);
+			if(poses.find(poseId) == poses.end() ||
+			   calMono.find(camKey) == calMono.end() ||
+			   !poseValues.exists(xkey) ||
+			   (excludedIter != excluded.end() && excludedIter->second.count(poseId)))
+			{
+				continue;
+			}
+			kept.push_back(jter);
+		}
+		if(kept.empty())
+		{
+			continue;
+		}
+
+		const gtsam::Symbol pkey = point3dSymbol(wordId);
+		initialEstimate.insert(pkey, gtsam::Point3(pt3d.x, pt3d.y, pt3d.z));
+		insertedPoints.insert(pkey);
+
+		for(size_t k=0; k<kept.size(); ++k)
+		{
+			const int poseId    = kept[k]->first;
+			const FeatureBA & f = kept[k]->second;
+			const std::pair<int,int> camKey(poseId, f.cameraIndex);
+			const gtsam::Symbol xkey('x', poseId * GTSAM_BA_MULTICAM_OFFSET + f.cameraIndex);
+			const double depth    = f.depth;
+			const double baseline = baselineByCam.count(camKey) ? baselineByCam.at(camKey) : 0.0;
+			const bool isStereo   = (uIsFinite(depth) && depth > 0.0 && baseline > 0.0 && calStereo.count(camKey));
+			const size_t factorIdx = graph.size();
+
+			if(isStereo)
+			{
+				const gtsam::Cal3_S2Stereo::shared_ptr & Ks = calStereo.at(camKey);
+				const double disparity = baseline * Ks->fx() / depth;
+				const gtsam::StereoPoint2 obs(f.kpt.pt.x, f.kpt.pt.x - disparity, f.kpt.pt.y);
+				graph.add(gtsam::GenericStereoFactor<gtsam::Pose3, gtsam::Point3>(
+						obs, stereoNoiseModel, xkey, pkey, Ks));
+			}
+			else
+			{
+				if(baseline > 0.0)
+				{
+					UDEBUG("Stereo cam detected but observation (word=%d cam=%d.%d) has null depth (%f m), adding mono observation instead.",
+							wordId, poseId, f.cameraIndex, depth);
+				}
+				const gtsam::Cal3_S2::shared_ptr & K = calMono.at(camKey);
+				graph.add(gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>(
+						gtsam::Point2(f.kpt.pt.x, f.kpt.pt.y), monoNoiseModel, xkey, pkey, K));
+			}
+			obsFactors.push_back(ObsFactor{factorIdx, wordId, poseId});
+		}
+	}
+	};
+	addLandmarks(BAOutliers());
+
+	// 5) Optimize. Wrapped so the rejection pass can re-solve; false = gave up.
+	UTimer timer;
+	gtsam::Values result;
+	double finalError = std::numeric_limits<double>::quiet_NaN();
+	auto solveGraph = [&](int maxIterations) -> bool
+	{
+	try
+	{
+		// Always use Levenberg-Marquardt for BA, ignoring GTSAM/Optimizer.
+		// Same rationale as the g2o BA path: BA's Hessian is often
+		// near-singular (points near infinity, near-parallel rays), so
+		// Gauss-Newton's unbounded step can blow up. Dogleg works but
+		// offers no advantage over LM on BA. LM is what every major BA
+		// library (Ceres, g2o, COLMAP) defaults to.
+		gtsam::LevenbergMarquardtParams params;
+		if(epsilon() > 0.0)
+		{
+			params.relativeErrorTol = epsilon();
+			params.absoluteErrorTol = epsilon();
+		}
+		params.maxIterations    = maxIterations;
+		// Use PCG + Block-Jacobi instead of GTSAM's default multifrontal
+		// Cholesky, which is faster here. The inner tolerances must be tight
+		// enough that the iterative solver doesn't bottom out before LM
+		// converges; 1e-10 comes from GTSAM's SFMExample_SmartFactorPCG.
+		params.linearSolverType = gtsam::NonlinearOptimizerParams::Iterative;
+		gtsam::PCGSolverParameters::shared_ptr pcg(new gtsam::PCGSolverParameters());
+		gtsam::PreconditionerParameters::shared_ptr preconditioner(
+				new gtsam::BlockJacobiPreconditionerParameters());
+#if GTSAM_VERSION_NUMERIC >= 40300
+		// 4.3+: setter removed, fields renamed (epsilon_abs_ -> epsilon_abs).
+		pcg->preconditioner = preconditioner;
+		pcg->epsilon_abs = 1e-10;
+		pcg->epsilon_rel = 1e-10;
+#else
+		// Assign the member directly instead of calling setPreconditionerParams():
+		// the setter does exactly this but was only added after 4.0, and the
+		// Android build pins GTSAM 4.0.0.
+		pcg->preconditioner_ = preconditioner;
+		pcg->epsilon_abs_ = 1e-10;
+		pcg->epsilon_rel_ = 1e-10;
+#endif
+		params.iterativeParams = pcg;
+		gtsam::NonlinearOptimizer * optimizer = new gtsam::LevenbergMarquardtOptimizer(graph, initialEstimate, params);
+		UDEBUG("GTSAM BA optimizing (max iterations=%d, robustKernel=%f)...", maxIterations, robustKernelDelta_);
+		result = optimizer->optimize();
+		finalError = optimizer->error();
+		UDEBUG("GTSAM BA done (initialError=%f finalError=%f time=%fs)", graph.error(initialEstimate), finalError, timer.ticks());
+		delete optimizer;
+	}
+	catch(const gtsam::IndeterminantLinearSystemException & e)
+	{
+		UERROR("GTSAM BA: indeterminant linear system: %s", e.what());
+		return false;
+	}
+	catch(const std::exception & e)
+	{
+		UERROR("GTSAM BA failed: %s", e.what());
+		return false;
+	}
+
+	if(uIsNan(finalError))
+	{
+		UERROR("GTSAM BA produced a NaN error.");
+		return false;
+	}
+	return true;
+	};
+
+	// Pass 1 only needs to get close enough for bad residuals to stand out; pass 2
+	// re-solves with the full budget. 5 matches the g2o backend.
+	const bool rejectOutliers = robustKernelDelta_ > 0.0;
+	if(!solveGraph(rejectOutliers ? std::min(5, iterations()) : iterations()))
+	{
+		UWARN("GTSAM BA: solve failed, aborting optimization!");
+		return optimizedPoses;
+	}
+
+	// 5b) Hard rejection, like g2o. The Huber kernel only down-weights, and that
+	//     residual pull keeps biasing the landmark however many iterations run.
+	//     Runs even when the caller wants no report -- rejection is what fixes
+	//     the estimate -- and pass 2 runs even with nothing rejected, since pass 1
+	//     was truncated.
+	BAOutliers rejected;
+	if(rejectOutliers)
+	{
+		// chi^2 > delta, the documented meaning of Optimizer/RobustKernelDelta,
+		// matching OptimizerG2O. error() returns 0.5*rho(|r|), and rho == chi^2
+		// below the kernel knee -- which the whole rejection band sits under -- so
+		// 2*error is the raw chi^2 here. Past the knee rho still exceeds delta.
+		int rejectedCount = 0;
+		for(std::vector<ObsFactor>::const_iterator iter = obsFactors.begin(); iter != obsFactors.end(); ++iter)
+		{
+			if(iter->factorIndex >= graph.size()) continue;
+			if(2.0 * graph.at(iter->factorIndex)->error(result) > robustKernelDelta_)
+			{
+				rejected[iter->wordId].insert(iter->poseId);
+				++rejectedCount;
+			}
+		}
+		UDEBUG("GTSAM BA: re-solving without %d rejected observation(s) over %d word(s)...",
+				rejectedCount, (int)rejected.size());
+		const gtsam::Values firstPass = result;
+		graph = poseGraph;
+		initialEstimate = poseValues;
+		addLandmarks(rejected);
+		// Warm-start from pass 1 where the variable survived, like g2o.
+		const auto warmStartKeys = initialEstimate.keys();
+		for(const gtsam::Key & key : warmStartKeys)
+		{
+			if(firstPass.exists(key))
+			{
+				initialEstimate.update(key, firstPass.at(key));
+			}
+		}
+		if(!solveGraph(iterations()))
+		{
+			// Rejection left something unsolvable (a landmark down to one ray).
+			// The first-pass solution still carries the outliers' pull, so it is
+			// not worth handing back -- fail like the other solver paths do.
+			UWARN("GTSAM BA: re-solve without the %d rejected observation(s) failed, "
+				  "aborting optimization!", rejectedCount);
+			return optimizedPoses;
+		}
+	}
+	if(outliers)
+	{
+		*outliers = rejected;
+	}
+
+	// 6) Read back poses (camera frame -> body frame via localTransform^-1).
+	for(std::map<int, Transform>::const_iterator iter = poses.begin(); iter!=poses.end(); ++iter)
+	{
+		if(iter->first <= 0)
+		{
+			continue;
+		}
+		const gtsam::Symbol xkey('x', iter->first * GTSAM_BA_MULTICAM_OFFSET);
+		if(!result.exists(xkey))
+		{
+			continue;
+		}
+		Transform t = Transform::fromEigen4d(result.at<gtsam::Pose3>(xkey).matrix());
+		t *= models.at(iter->first)[0].localTransform().inverse();
+		if(t.isNull())
+		{
+			UERROR("GTSAM BA: optimized pose %d is null", iter->first);
+			optimizedPoses.clear();
+			return optimizedPoses;
+		}
+		if(isSlam2d())
+		{
+			// Same snap-back idiom as g2o / Ceres: PlanarBodyZFactor locks
+			// each non-root body z to its initial value, but tiny LM-residual
+			// slack can still leave a sub-mm drift. Snap z back exactly when
+			// within tolerance; fall back to a 2D-projected delta otherwise.
+			if(std::fabs(t.z() - iter->second.z()) < 0.001f)
+			{
+				t.z() = iter->second.z();
+			}
+			else
+			{
+				UWARN("Planar constraints didn't work!? original pose (%d), pose %s -> %s. Falling back to old approach.",
+						iter->first,
+						iter->second.prettyPrint().c_str(),
+						t.prettyPrint().c_str());
+				const Transform delta = iter->second.inverse() * t;
+				t = iter->second * delta.to3DoF();
+			}
+		}
+		optimizedPoses.insert(std::make_pair(iter->first, t));
+	}
+
+	// 7) Read back 3D points. Fully rejected landmarks were never added as
+	//    variables, so their input estimate stands.
+	for(std::map<int, cv::Point3f>::iterator iter = points3DMap.begin(); iter != points3DMap.end(); ++iter)
+	{
+		const gtsam::Symbol pkey = point3dSymbol(iter->first);
+		if(insertedPoints.count(pkey) && result.exists(pkey))
+		{
+			const gtsam::Point3 p = result.at<gtsam::Point3>(pkey);
+			iter->second = cv::Point3f(static_cast<float>(p.x()), static_cast<float>(p.y()), static_cast<float>(p.z()));
+		}
+	}
+
+#else
+	UERROR("Not built with GTSAM support!");
+	(void)rootId;
+	(void)poses;
+	(void)links;
+	(void)models;
+	(void)points3DMap;
+	(void)wordReferences;
+	(void)outliers;
 #endif
 	return optimizedPoses;
 }

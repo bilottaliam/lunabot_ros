@@ -54,19 +54,6 @@ namespace util3d
 std::vector<cv::Point3f> generateKeypoints3DDepth(
 		const std::vector<cv::KeyPoint> & keypoints,
 		const cv::Mat & depth,
-		const CameraModel & cameraModel,
-		float minDepth,
-		float maxDepth)
-{
-	UASSERT(cameraModel.isValidForProjection());
-	std::vector<CameraModel> models;
-	models.push_back(cameraModel);
-	return generateKeypoints3DDepth(keypoints, depth, models, minDepth, maxDepth);
-}
-
-std::vector<cv::Point3f> generateKeypoints3DDepth(
-		const std::vector<cv::KeyPoint> & keypoints,
-		const cv::Mat & depth,
 		const std::vector<CameraModel> & cameraModels,
 		float minDepth,
 		float maxDepth)
@@ -117,6 +104,19 @@ std::vector<cv::Point3f> generateKeypoints3DDepth(
 		}
 	}
 	return keypoints3d;
+}
+
+std::vector<cv::Point3f> generateKeypoints3DDepth(
+		const std::vector<cv::KeyPoint> & keypoints,
+		const cv::Mat & depth,
+		const CameraModel & cameraModel,
+		float minDepth,
+		float maxDepth)
+{
+	UASSERT(cameraModel.isValidForProjection());
+	std::vector<CameraModel> models;
+	models.push_back(cameraModel);
+	return generateKeypoints3DDepth(keypoints, depth, models, minDepth, maxDepth);
 }
 
 std::vector<cv::Point3f> generateKeypoints3DDisparity(
@@ -213,6 +213,7 @@ std::map<int, cv::Point3f> generateWords3DMono(
 		Transform & cameraTransform,
 		float ransacReprojThreshold,
 		float ransacConfidence,
+		int varianceMedianRatio,
 		const std::map<int, cv::Point3f> & refGuess3D,
 		double * varianceOut,
 		std::vector<int> * matchesOut)
@@ -345,7 +346,7 @@ std::map<int, cv::Point3f> generateWords3DMono(
 							errorSqrdDists[j] = uNormSquared(refPt.x-newPt.x, refPt.y-newPt.y, refPt.z-newPt.z);
 						}
 						std::sort(errorSqrdDists.begin(), errorSqrdDists.end());
-						double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> 2];
+						double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> varianceMedianRatio];
 						float var = 2.1981 * median_error_sqr;
 						//UDEBUG("scale %d = %f variance = %f", (int)i, s, variance);
 
@@ -369,7 +370,7 @@ std::map<int, cv::Point3f> generateWords3DMono(
 						errorSqrdDists[j] = uNormSquared(refPt.x-newPt.x, refPt.y-newPt.y, refPt.z-newPt.z);
 					}
 					std::sort(errorSqrdDists.begin(), errorSqrdDists.end());
-					double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> 2];
+					double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> varianceMedianRatio];
 					variance = 2.1981 * median_error_sqr;
 				}
 			}
@@ -415,6 +416,7 @@ std::multimap<int, cv::KeyPoint> aggregate(
 		const std::list<int> & wordIds,
 		const std::vector<cv::KeyPoint> & keypoints)
 {
+	UASSERT(wordIds.size() == keypoints.size());
 	std::multimap<int, cv::KeyPoint> words;
 	std::vector<cv::KeyPoint>::const_iterator kpIter = keypoints.begin();
 	for(std::list<int>::const_iterator iter=wordIds.begin(); iter!=wordIds.end(); ++iter)

@@ -43,7 +43,7 @@ public:
   // @param H    the optional Jacobian matrix, which use boost optional and has default null pointer
   gtsam::Vector evaluateError(const gtsam::Pose3& p,
 #if GTSAM_VERSION_NUMERIC >= 40300
-		  OptionalMatrixType H = OptionalNone) const {
+		  gtsam::OptionalMatrixType H = OptionalNone) const {
 #else
 		  boost::optional<gtsam::Matrix&> H = boost::none) const {
 #endif
@@ -55,13 +55,17 @@ public:
   }
   gtsam::Vector evaluateError(const gtsam::Point3& p,
 #if GTSAM_VERSION_NUMERIC >= 40300
-		  OptionalMatrixType H = OptionalNone) const {
+		  gtsam::OptionalMatrixType H = OptionalNone) const {
 #else
 		  boost::optional<gtsam::Matrix&> H = boost::none) const {
 #endif
+    if(H)
+    {
+      *H = gtsam::Matrix::Identity(3, 3);
+    }
     return (gtsam::Vector3() << p.x() - mx_, p.y() - my_, p.z() - mz_).finished();
   }
 };
 
-} // namespace gtsamexamples
+} // namespace rtabmap
 

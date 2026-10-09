@@ -114,8 +114,7 @@ void onTangoEventAvailableRouter(void* context, const TangoEvent* event)
 //////////////////////////////
 // CameraTango
 //////////////////////////////
-CameraTango::CameraTango(bool colorCamera, int decimation, bool publishRawScan, bool smoothing) :
-		CameraMobile(smoothing),
+CameraTango::CameraTango(bool colorCamera, int decimation, bool publishRawScan) :
 		tango_config_(0),
 		colorCamera_(colorCamera),
 		decimation_(decimation),
@@ -866,7 +865,7 @@ SensorData CameraTango::updateDataOnRender(Transform & pose)
 	}
 
 	SensorData data;
-	if(tangoDataReady_.acquireTry(1))
+	if(tangoDataReady_.acquireTry(1) == 0)
 	{
 		boost::mutex::scoped_lock  lock(tangoDataMutex_);
 		data = tangoData_;

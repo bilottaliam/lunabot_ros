@@ -72,13 +72,15 @@ bool DataRecorder::init(const QString & path, bool recordInRAM)
 		ParametersMap customParameters;
 		customParameters.insert(ParametersPair(Parameters::kMemRehearsalSimilarity(), "1.0")); // deactivate rehearsal
 		customParameters.insert(ParametersPair(Parameters::kKpMaxFeatures(), "-1")); // deactivate keypoints extraction
-		customParameters.insert(ParametersPair(Parameters::kMemBinDataKept(), "true")); // to keep images
+		customParameters.insert(ParametersPair(Parameters::kMemBinDataKept(), "true")); // make sure we keep images
 		customParameters.insert(ParametersPair(Parameters::kMemMapLabelsAdded(), "false")); // don't create map labels
+		customParameters.insert(ParametersPair(Parameters::kRGBDCreateOccupancyGrid(), "false")); // make sure we don't create local grids
 		customParameters.insert(ParametersPair(Parameters::kMemBadSignaturesIgnored(), "true")); // make sure memory cleanup is done
-		customParameters.insert(ParametersPair(Parameters::kMemIntermediateNodeDataKept(), "true"));
-		if(!recordInRAM)
+		customParameters.insert(ParametersPair(Parameters::kMemNotLinkedNodesKept(), "true")); // make sure we save every frame
+
+		if(recordInRAM)
 		{
-			customParameters.insert(ParametersPair(Parameters::kDbSqlite3InMemory(), "false"));
+			customParameters.insert(ParametersPair(Parameters::kDbSqlite3InMemory(), "true"));
 		}
 		memory_ = new Memory();
 		if(!memory_->init(path.toStdString(), true, customParameters))
@@ -138,7 +140,7 @@ void DataRecorder::addData(const rtabmap::SensorData & data, const Transform & p
 		//save to database
 		UTimer time;
 		memory_->update(data, pose, covariance);
-		const Signature * s = memory_->getLastWorkingSignature();
+		const Signature * s = memory_->getLastWorkingSignature(false);
 		totalSizeKB_ += (int)s->sensorData().imageCompressed().total()/1000;
 		totalSizeKB_ += (int)s->sensorData().depthOrRightCompressed().total()/1000;
 		totalSizeKB_ += (int)s->sensorData().laserScanCompressed().data().total()/1000;
@@ -156,8 +158,12 @@ void DataRecorder::addData(const rtabmap::SensorData & data, const Transform & p
 void DataRecorder::showImage(const cv::Mat & image, const cv::Mat & depth)
 {
 	processingImages_ = true;
-	imageView_->setImage(uCvMat2QImage(image));
-	imageView_->setImageDepth(depth);
+	if(!image.empty()) {
+		imageView_->setImage(uCvMat2QImage(image));
+	}
+	if(!depth.empty()) {
+		imageView_->setImageDepth(depth);
+	}
 	label_->setText(tr("Images=%1 (~%2 MB)").arg(count_).arg(totalSizeKB_/1000));
 	processingImages_ = false;
 }

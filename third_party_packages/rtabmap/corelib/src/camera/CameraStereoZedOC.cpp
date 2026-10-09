@@ -38,6 +38,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <zed-open-capture/sensorcapture.hpp>
 #include "SimpleIni.h"
 
+#if CV_MAJOR_VERSION >= 5
+#include <opencv2/geometry.hpp>
+#endif
+
 ///////////////////////////////////////////////////////////////////////////
 //
 // Copyright (c) 2018, STEREOLABS.
@@ -755,7 +759,10 @@ SensorData CameraStereoZedOC::captureImage(SensorCaptureInfo * info)
 
 					// ----> Extract left and right images from side-by-side
 					left = frameBGR(cv::Rect(0, 0, frameBGR.cols / 2, frameBGR.rows));
-					cv::cvtColor(frameBGR(cv::Rect(frameBGR.cols / 2, 0, frameBGR.cols / 2, frameBGR.rows)),right,cv::COLOR_BGR2GRAY);
+					if(rightGrayScale_)
+						cv::cvtColor(frameBGR(cv::Rect(frameBGR.cols / 2, 0, frameBGR.cols / 2, frameBGR.rows)),right,cv::COLOR_BGR2GRAY);
+					else
+						right = frameBGR(cv::Rect(frameBGR.cols / 2, 0, frameBGR.cols / 2, frameBGR.rows));
 					// <---- Extract left and right images from side-by-side
 
 					if(stereoModel_.isValidForRectification())
@@ -790,6 +797,13 @@ SensorData CameraStereoZedOC::captureImage(SensorCaptureInfo * info)
 	UERROR("CameraStereoZEDOC: RTAB-Map is not built with ZED Open Capture support!");
 #endif
 	return data;
+}
+
+void CameraStereoZedOC::setRightGrayScale(bool enabled)
+{
+#ifdef RTABMAP_ZEDOC
+	rightGrayScale_ = enabled;
+#endif
 }
 
 } // namespace rtabmap

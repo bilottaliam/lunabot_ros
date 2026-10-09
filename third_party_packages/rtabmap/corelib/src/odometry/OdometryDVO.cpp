@@ -31,7 +31,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/utilite/ULogger.h"
 #include "rtabmap/utilite/UTimer.h"
 #include "rtabmap/utilite/UStl.h"
-#include <opencv2/imgproc/types_c.h>
 
 #ifdef RTABMAP_DVO
 #include <dvo/dense_tracking.h>
@@ -124,7 +123,7 @@ Transform OdometryDVO::computeTransform(
 	{
 		if(data.imageRaw().type() == CV_8UC3)
 		{
-			cv::cvtColor(data.imageRaw(), grey, CV_BGR2GRAY);
+			cv::cvtColor(data.imageRaw(), grey, cv::COLOR_BGR2GRAY);
 		}
 		else
 		{
@@ -217,7 +216,7 @@ Transform OdometryDVO::computeTransform(
 			t = motionFromKeyFrame_.inverse() * t;
 
 			// TODO make parameters?
-			if(currentMotion.getNorm() > 0.01 || currentMotion.getAngle() > 0.01)
+			if(currentMotion.getNorm() > 0.01 || currentMotion.getAngle(Transform::getIdentity()) > 0.01)
 			{
 				if(info)
 				{

@@ -39,14 +39,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/utilite/UConversion.h"
 #include "rtabmap/utilite/UMath.h"
 #include "rtabmap/utilite/UTimer.h"
-#include <opencv2/core/core_c.h>
-#include <opencv2/imgproc/types_c.h>
 #include <pcl/search/kdtree.h>
 #include <pcl/surface/gp3.h>
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl/surface/mls.h>
 #include <pcl18/surface/texture_mapping.h>
 #include <pcl/features/integral_image_normal.h>
+#include <algorithm>
 
 #ifdef RTABMAP_ALICE_VISION
 #include <aliceVision/sfmData/SfMData.hpp>
@@ -90,6 +89,61 @@ namespace rtabmap
 
 namespace util3d
 {
+
+namespace {
+float pcaEigenvalueAt(const cv::Mat & eigenvalues, int index)
+{
+	if(eigenvalues.empty())
+	{
+		return 0.f;
+	}
+	if(eigenvalues.rows == 1)
+	{
+		index = std::min(index, eigenvalues.cols - 1);
+		return eigenvalues.at<float>(0, index);
+	}
+	index = std::min(index, eigenvalues.rows - 1);
+	return eigenvalues.at<float>(index, 0);
+}
+
+// Shared eigendecomposition of a normals matrix (each row is a normal).
+// centered=true  -> covariance (cv::PCA): measures spread *around the mean*.
+//                  Misses degeneracy when ≤ dim distinct viewpoint-flipped
+//                  normal directions sit on a single (dim-1)-D affine
+//                  subspace (e.g. 3 perpendicular surfaces with normals
+//                  +x/+y/+z all sum to mean (1/3,1/3,1/3) -> rank-2).
+// centered=false -> uncentered second-moment matrix (1/N) * Σ nᵢ nᵢᵀ:
+//                  smallest eigenvalue is 0 iff normals are confined to a
+//                  (dim-1)-D linear subspace, which is the actual ICP
+//                  observability question.  Recommended for the
+//                  PointToPlane low-complexity check.
+// Returns smallest eigenvalue * dim (so values scale ~[0,1]).
+float normalsComplexity(
+		const cv::Mat & normals,
+		bool centered,
+		cv::Mat * pcaEigenVectors,
+		cv::Mat * pcaEigenValues)
+{
+	const int dim = normals.cols;
+	cv::Mat eigVals, eigVecs;
+	if(centered)
+	{
+		cv::PCA pca(normals, cv::Mat(), cv::PCA::DATA_AS_ROW);
+		eigVals = pca.eigenvalues;
+		eigVecs = pca.eigenvectors;
+	}
+	else
+	{
+		cv::Mat M;
+		cv::mulTransposed(normals, M, /*aTa=*/true);
+		M /= static_cast<float>(normals.rows);
+		cv::eigen(M, eigVals, eigVecs);
+	}
+	if(pcaEigenVectors) *pcaEigenVectors = eigVecs;
+	if(pcaEigenValues)  *pcaEigenValues  = eigVals;
+	return pcaEigenvalueAt(eigVals, dim - 1) * static_cast<float>(dim);
+}
+} // namespace
 
 void createPolygonIndexes(
 		const std::vector<pcl::Vertices> & polygons,
@@ -684,7 +738,8 @@ pcl::TextureMesh::Ptr createTextureMesh(
 		const std::vector<float> & roiRatios,
 		const ProgressState * state,
 		std::vector<std::map<int, pcl::PointXY> > * vertexToPixels,
-		bool distanceToCamPolicy)
+		bool distanceToCamPolicy,
+		int numThreads)
 {
 	std::map<int, std::vector<CameraModel> > cameraSubModels;
 	for(std::map<int, CameraModel>::const_iterator iter=cameraModels.begin(); iter!=cameraModels.end(); ++iter)
@@ -706,7 +761,8 @@ pcl::TextureMesh::Ptr createTextureMesh(
 			roiRatios,
 			state,
 			vertexToPixels,
-			distanceToCamPolicy);
+			distanceToCamPolicy,
+			numThreads);
 }
 
 pcl::TextureMesh::Ptr createTextureMesh(
@@ -721,7 +777,8 @@ pcl::TextureMesh::Ptr createTextureMesh(
 		const std::vector<float> & roiRatios,
 		const ProgressState * state,
 		std::vector<std::map<int, pcl::PointXY> > * vertexToPixels,
-		bool distanceToCamPolicy)
+		bool distanceToCamPolicy,
+		int numThreads)
 {
 	UASSERT(mesh->polygons.size());
 	pcl::TextureMesh::Ptr textureMesh(new pcl::TextureMesh);
@@ -781,12 +838,9 @@ pcl::TextureMesh::Ptr createTextureMesh(
 	pcl::TextureMapping<pcl::PointXYZ> tm; // TextureMapping object that will perform the sort
 	tm.setMaxDistance(maxDistance);
 	tm.setMaxAngle(maxAngle);
-	if(maxDepthError > 0.0f)
-	{
-		tm.setMaxDepthError(maxDepthError);
-	}
+	tm.setMaxDepthError(maxDepthError);
 	tm.setMinClusterSize(minClusterSize);
-	if(tm.textureMeshwithMultipleCameras2(*textureMesh, cameras, state, vertexToPixels, distanceToCamPolicy))
+	if(tm.textureMeshwithMultipleCameras2(*textureMesh, cameras, state, vertexToPixels, distanceToCamPolicy, numThreads))
 	{
 		// compute normals for the mesh if not already here
 		bool hasNormals = false;
@@ -1454,6 +1508,7 @@ cv::Mat mergeTextures(
 		bool exposureFusion,
 		const ProgressState * state,
 		unsigned char blankValue,
+		bool clearVertexColorUnderTexture,
 		std::map<int, std::map<int, cv::Vec4d> > * gains,
 		std::map<int, std::map<int, cv::Mat> > * blendingGains,
 		std::pair<float, float> * contrastValues)
@@ -1483,6 +1538,7 @@ cv::Mat mergeTextures(
 			exposureFusion,
 			state,
 			blankValue,
+			clearVertexColorUnderTexture,
 			gains,
 			blendingGains,
 			contrastValues);
@@ -1506,6 +1562,7 @@ cv::Mat mergeTextures(
 		bool exposureFusion,
 		const ProgressState * state,
 		unsigned char blankValue,
+		bool clearVertexColorUnderTexture,
 		std::map<int, std::map<int, cv::Vec4d> > * gainsOut,
 		std::map<int, std::map<int, cv::Mat> > * blendingGainsOut,
 		std::pair<float, float> * contrastValuesOut)
@@ -1745,7 +1802,7 @@ cv::Mat mergeTextures(
 							if(resizedImage.type() == CV_8UC1)
 							{
 								cv::Mat resizedImageColor;
-								cv::cvtColor(resizedImage, resizedImageColor, CV_GRAY2BGR);
+								cv::cvtColor(resizedImage, resizedImageColor, cv::COLOR_GRAY2BGR);
 								resizedImage = resizedImageColor;
 							}
 							UASSERT(resizedImage.type() == globalTextures.type());
@@ -2186,6 +2243,70 @@ cv::Mat mergeTextures(
 					if(state) state->callback(uFormat("Brightness and contrast auto %fs", timer.ticks()));
 				}
 			}
+			
+			// Cloud color
+			if(clearVertexColorUnderTexture)
+			{
+				int colorOffset = 0;
+				for(unsigned int i=0; i<mesh.cloud.fields.size(); ++i)
+				{
+					if(mesh.cloud.fields[i].name.compare("rgb") == 0)
+					{
+						colorOffset = mesh.cloud.fields[i].offset;
+						break;
+					}
+				}
+				if(colorOffset>0)
+				{
+					pcl::IndicesPtr notTexturedVertexIndices(new std::vector<int>);
+					UASSERT(mesh.tex_coordinates.size() == mesh.tex_polygons.size());
+					for(size_t t=0; t<mesh.tex_polygons.size(); ++t)
+					{
+						int pixelIndex = 0;
+						for(size_t p=0; p<mesh.tex_polygons[t].size(); ++p)
+						{
+							// only clear polygon color if all 3 vertices have valid tex coordinates.
+							bool valid = true;
+							for(size_t v=0; v<mesh.tex_polygons[t][p].vertices.size() && valid; ++v)
+							{
+								UASSERT(pixelIndex+v < mesh.tex_coordinates[t].size());
+								const Eigen::Vector2f & uv = mesh.tex_coordinates[t][pixelIndex+v];
+								if(uv[0] == -1 || uv[1] == -1)
+								{
+									valid = false;
+								}
+							}
+							if(!valid)
+							{
+								for(size_t v=0; v<mesh.tex_polygons[t][p].vertices.size(); ++v)
+								{
+									int vertex = mesh.tex_polygons[t][p].vertices[v];
+									notTexturedVertexIndices->push_back(vertex);
+								}
+							}
+							pixelIndex+=mesh.tex_polygons[t][p].vertices.size();
+						}
+					}
+					// Set up the full indices set
+					pcl::IndicesPtr full_indices(new std::vector<int>(mesh.cloud.width* mesh.cloud.height));
+					for (size_t fii = 0; fii < full_indices->size(); ++fii)  // fii = full indices iterator
+						full_indices->at(fii) = fii;
+
+					// Set up the sorted input indices
+					std::sort (notTexturedVertexIndices->begin (), notTexturedVertexIndices->end ());
+
+					// Store the difference in indices
+					pcl::IndicesPtr texturedVertexIndices(new std::vector<int>());
+					std::set_difference (full_indices->begin (), full_indices->end (), notTexturedVertexIndices->begin (), notTexturedVertexIndices->end (), std::inserter (*texturedVertexIndices, texturedVertexIndices->begin ()));
+
+					for(size_t i=0; i<texturedVertexIndices->size(); ++i)
+					{
+						std::uint32_t white = 0xffffff;
+						UASSERT(texturedVertexIndices->at(i) * mesh.cloud.point_step + colorOffset < mesh.cloud.data.size());
+						memcpy(&mesh.cloud.data.data()[texturedVertexIndices->at(i) * mesh.cloud.point_step + colorOffset], reinterpret_cast<float*>(&white), sizeof(float));
+					}
+				}
+			}
 		}
 	}
 	UDEBUG("globalTextures=%d", globalTextures.cols?globalTextures.cols / globalTextures.rows:0);
@@ -2545,7 +2666,7 @@ bool multiBandTexturing(
 				if(imageRoi.channels() == 1)
 				{
 					cv::Mat imageRoiColor;
-					cv::cvtColor(imageRoi, imageRoiColor, CV_GRAY2BGR);
+					cv::cvtColor(imageRoi, imageRoiColor, cv::COLOR_GRAY2BGR);
 					imageRoi = imageRoiColor;
 				}
 
@@ -3101,7 +3222,8 @@ float computeNormalsComplexity(
 		const LaserScan & scan,
 		const Transform & t,
 		cv::Mat * pcaEigenVectors,
-		cv::Mat * pcaEigenValues)
+		cv::Mat * pcaEigenValues,
+		bool centered)
 {
 	if(!scan.isEmpty() && (scan.hasNormals()))
 	{
@@ -3154,19 +3276,9 @@ float computeNormalsComplexity(
 		}
 		if(oi>1)
 		{
-			cv::PCA pca_analysis(cv::Mat(data_normals, cv::Range(0, oi*2)), cv::Mat(), CV_PCA_DATA_AS_ROW);
-
-			if(pcaEigenVectors)
-			{
-				*pcaEigenVectors = pca_analysis.eigenvectors;
-			}
-			if(pcaEigenValues)
-			{
-				*pcaEigenValues = pca_analysis.eigenvalues;
-			}
-			UASSERT((is2d && pca_analysis.eigenvalues.total()>=2) || (!is2d && pca_analysis.eigenvalues.total()>=3));
-			// Get last eigen value, scale between 0 and 1: 0=low complexity, 1=high complexity
-			return pca_analysis.eigenvalues.at<float>(0, is2d?1:2)*(is2d?2.0f:3.0f);
+			return normalsComplexity(
+					cv::Mat(data_normals, cv::Range(0, oi)),
+					centered, pcaEigenVectors, pcaEigenValues);
 		}
 	}
 	else if(!scan.isEmpty())
@@ -3181,7 +3293,8 @@ float computeNormalsComplexity(
 		const Transform & t,
 		bool is2d,
 		cv::Mat * pcaEigenVectors,
-		cv::Mat * pcaEigenValues)
+		cv::Mat * pcaEigenValues,
+		bool centered)
 {
 	 //Construct a buffer used by the pca analysis
 	int sz = static_cast<int>(cloud.size()*2);
@@ -3215,19 +3328,9 @@ float computeNormalsComplexity(
 	}
 	if(oi>1)
 	{
-		cv::PCA pca_analysis(cv::Mat(data_normals, cv::Range(0, oi*2)), cv::Mat(), CV_PCA_DATA_AS_ROW);
-
-		if(pcaEigenVectors)
-		{
-			*pcaEigenVectors = pca_analysis.eigenvectors;
-		}
-		if(pcaEigenValues)
-		{
-			*pcaEigenValues = pca_analysis.eigenvalues;
-		}
-
-		// Get last eigen value, scale between 0 and 1: 0=low complexity, 1=high complexity
-		return pca_analysis.eigenvalues.at<float>(0, is2d?1:2)*(is2d?2.0f:3.0f);
+		return normalsComplexity(
+				cv::Mat(data_normals, cv::Range(0, oi)),
+				centered, pcaEigenVectors, pcaEigenValues);
 	}
 	return 0.0f;
 }
@@ -3237,7 +3340,8 @@ float computeNormalsComplexity(
 		const Transform & t,
 		bool is2d,
 		cv::Mat * pcaEigenVectors,
-		cv::Mat * pcaEigenValues)
+		cv::Mat * pcaEigenValues,
+		bool centered)
 {
 	 //Construct a buffer used by the pca analysis
 	int sz = static_cast<int>(normals.size()*2);
@@ -3271,19 +3375,9 @@ float computeNormalsComplexity(
 	}
 	if(oi>1)
 	{
-		cv::PCA pca_analysis(cv::Mat(data_normals, cv::Range(0, oi*2)), cv::Mat(), CV_PCA_DATA_AS_ROW);
-
-		if(pcaEigenVectors)
-		{
-			*pcaEigenVectors = pca_analysis.eigenvectors;
-		}
-		if(pcaEigenValues)
-		{
-			*pcaEigenValues = pca_analysis.eigenvalues;
-		}
-
-		// Get last eigen value, scale between 0 and 1: 0=low complexity, 1=high complexity
-		return pca_analysis.eigenvalues.at<float>(0, is2d?1:2)*(is2d?2.0f:3.0f);
+		return normalsComplexity(
+				cv::Mat(data_normals, cv::Range(0, oi)),
+				centered, pcaEigenVectors, pcaEigenValues);
 	}
 	return 0.0f;
 }
@@ -3293,7 +3387,8 @@ float computeNormalsComplexity(
 		const Transform & t,
 		bool is2d,
 		cv::Mat * pcaEigenVectors,
-		cv::Mat * pcaEigenValues)
+		cv::Mat * pcaEigenValues,
+		bool centered)
 {
 	 //Construct a buffer used by the pca analysis
 	int sz = static_cast<int>(cloud.size()*2);
@@ -3327,19 +3422,9 @@ float computeNormalsComplexity(
 	}
 	if(oi>1)
 	{
-		cv::PCA pca_analysis(cv::Mat(data_normals, cv::Range(0, oi*2)), cv::Mat(), CV_PCA_DATA_AS_ROW);
-
-		if(pcaEigenVectors)
-		{
-			*pcaEigenVectors = pca_analysis.eigenvectors;
-		}
-		if(pcaEigenValues)
-		{
-			*pcaEigenValues = pca_analysis.eigenvalues;
-		}
-
-		// Get last eigen value, scale between 0 and 1: 0=low complexity, 1=high complexity
-		return pca_analysis.eigenvalues.at<float>(0, is2d?1:2)*(is2d?2.0f:3.0f);
+		return normalsComplexity(
+				cv::Mat(data_normals, cv::Range(0, oi)),
+				centered, pcaEigenVectors, pcaEigenValues);
 	}
 	return 0.0f;
 }
@@ -3349,7 +3434,8 @@ float computeNormalsComplexity(
 		const Transform & t,
 		bool is2d,
 		cv::Mat * pcaEigenVectors,
-		cv::Mat * pcaEigenValues)
+		cv::Mat * pcaEigenValues,
+		bool centered)
 {
 	 //Construct a buffer used by the pca analysis
 	int sz = static_cast<int>(cloud.size()*2);
@@ -3383,19 +3469,9 @@ float computeNormalsComplexity(
 	}
 	if(oi>1)
 	{
-		cv::PCA pca_analysis(cv::Mat(data_normals, cv::Range(0, oi*2)), cv::Mat(), CV_PCA_DATA_AS_ROW);
-
-		if(pcaEigenVectors)
-		{
-			*pcaEigenVectors = pca_analysis.eigenvectors;
-		}
-		if(pcaEigenValues)
-		{
-			*pcaEigenValues = pca_analysis.eigenvalues;
-		}
-
-		// Get last eigen value, scale between 0 and 1: 0=low complexity, 1=high complexity
-		return pca_analysis.eigenvalues.at<float>(0, is2d?1:2)*(is2d?2.0f:3.0f);
+		return normalsComplexity(
+				cv::Mat(data_normals, cv::Range(0, oi)),
+				centered, pcaEigenVectors, pcaEigenValues);
 	}
 	return 0.0f;
 }
@@ -3530,7 +3606,7 @@ LaserScan adjustNormalsToViewPoint(
 
 					float result = v.dot(n);
 					if(result < 0
-					 || (groundNormalsUp>0.0f && ptr[nz] < -groundNormalsUp && ptr[2] < viewpoint[3])) // some far velodyne rays on road can have normals toward ground
+					 || (groundNormalsUp>0.0f && ptr[nz] < -groundNormalsUp && ptr[2] < viewpoint[2])) // some far velodyne rays on road can have normals toward ground
 					{
 						//reverse normal
 						ptr[nx] *= -1.0f;
@@ -3569,7 +3645,7 @@ void adjustNormalsToViewPointImpl(
 
 			float result = v.dot(n);
 			if(result < 0
-				|| (groundNormalsUp>0.0f && normal.z < -groundNormalsUp && cloud->points[i].z < viewpoint[3])) // some far velodyne rays on road can have normals toward ground
+				|| (groundNormalsUp>0.0f && normal.z < -groundNormalsUp && cloud->points[i].z < viewpoint[2])) // some far velodyne rays on road can have normals toward ground
 			{
 				//reverse normal
 				cloud->points[i].normal_x *= -1.0f;
@@ -3625,6 +3701,67 @@ void adjustNormalsToViewPoint(
 	adjustNormalsToViewPointImpl<pcl::PointXYZINormal>(cloud, viewpoint, groundNormalsUp);
 }
 
+template<typename PointT>
+void adjustNormalsToViewPointsImpl(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		typename pcl::PointCloud<PointT>::Ptr & cloud,
+		float groundNormalsUp)
+{
+	if(poses.size() && cloud->size() == cameraIndices.size() && cloud->size())
+	{
+		#pragma omp parallel for
+		for(int i=0; i<(int)cloud->size(); ++i)
+		{
+			pcl::PointXYZ normal(cloud->points[i].normal_x, cloud->points[i].normal_y, cloud->points[i].normal_z);
+			if(pcl::isFinite(normal))
+			{
+				const Transform & p = poses.at(cameraIndices[i]);
+				pcl::PointXYZ viewpoint(p.x(), p.y(), p.z());
+				Eigen::Vector3f v = viewpoint.getVector3fMap() - cloud->points[i].getVector3fMap();
+
+				Eigen::Vector3f n(normal.x, normal.y, normal.z);
+
+				float result = v.dot(n);
+				if(result < 0 ||
+					(groundNormalsUp>0.0f && normal.z < -groundNormalsUp && cloud->points[i].z < viewpoint.z)) // some far velodyne rays on road can have normals toward ground)
+				{
+					//reverse normal
+					cloud->points[i].normal_x *= -1.0f;
+					cloud->points[i].normal_y *= -1.0f;
+					cloud->points[i].normal_z *= -1.0f;
+				}
+			}
+		}
+	}
+}
+
+void adjustNormalsToViewPoints(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		pcl::PointCloud<pcl::PointNormal>::Ptr & cloud,
+		float groundNormalsUp)
+{
+	adjustNormalsToViewPointsImpl<pcl::PointNormal>(poses, cameraIndices, cloud, groundNormalsUp);
+}
+
+void adjustNormalsToViewPoints(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr & cloud,
+		float groundNormalsUp)
+{
+	adjustNormalsToViewPointsImpl<pcl::PointXYZRGBNormal>(poses, cameraIndices, cloud, groundNormalsUp);
+}
+
+void adjustNormalsToViewPoints(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		pcl::PointCloud<pcl::PointXYZINormal>::Ptr & cloud,
+		float groundNormalsUp)
+{
+	adjustNormalsToViewPointsImpl<pcl::PointXYZINormal>(poses, cameraIndices, cloud, groundNormalsUp);
+}
 
 template<typename PointT>
 void adjustNormalsToViewPointsImpl(
@@ -3818,6 +3955,359 @@ bool intersectRayTriangle(
         return false;
 
     return true;                    // I is in T
+}
+
+/**
+ * This is a modified copy of https://github.com/PointCloudLibrary/pcl/blob/pcl-1.12.1/io/src/obj_io.cpp
+ * with added color on each vertex if provided
+ */
+int saveOBJFile(
+	const std::string &file_name,
+	const pcl::TextureMesh &tex_mesh,
+	unsigned precision)
+{
+  if (tex_mesh.cloud.data.empty ())
+  {
+    UERROR ("Input point cloud has no data!\n");
+    return (-1);
+  }
+  // Open file
+  std::ofstream fs;
+  fs.precision (precision);
+  fs.open (file_name.c_str ());
+
+  // Define material file
+  std::string mtl_file_name = file_name.substr (0, file_name.find_last_of ('.')) + ".mtl";
+  // Strip path for "mtllib" command
+  std::string mtl_file_name_nopath = mtl_file_name;
+  mtl_file_name_nopath.erase (0, mtl_file_name.find_last_of ('/') + 1);
+
+  /* Write 3D information */
+  // number of points
+  unsigned nr_points  = tex_mesh.cloud.width * tex_mesh.cloud.height;
+  unsigned point_size = static_cast<unsigned> (tex_mesh.cloud.data.size () / nr_points);
+
+  // mesh size
+  unsigned nr_meshes = static_cast<unsigned> (tex_mesh.tex_polygons.size ());
+  // number of faces for header
+  unsigned nr_faces = 0;
+  for (unsigned m = 0; m < nr_meshes; ++m)
+    nr_faces += static_cast<unsigned> (tex_mesh.tex_polygons[m].size ());
+
+  // Write the header information
+  fs << "####" << '\n';
+  fs << "# OBJ dataFile simple version. File name: " << file_name << '\n';
+  fs << "# Vertices: " << nr_points << '\n';
+  fs << "# Faces: " <<nr_faces << '\n';
+  fs << "# Material information:" << '\n';
+  fs << "mtllib " << mtl_file_name_nopath << '\n';
+  fs << "####" << '\n';
+
+  // Write vertex coordinates
+  fs << "# Vertices" << '\n';
+  for (unsigned i = 0; i < nr_points; ++i)
+  {
+    int xyz = 0;
+    // "v" just be written one
+    bool v_written = false;
+    for (std::size_t d = 0; d < tex_mesh.cloud.fields.size (); ++d)
+    {
+      // adding vertex
+      if ((tex_mesh.cloud.fields[d].datatype == pcl::PCLPointField::FLOAT32) && (
+          tex_mesh.cloud.fields[d].name == "x" ||
+          tex_mesh.cloud.fields[d].name == "y" ||
+          tex_mesh.cloud.fields[d].name == "z"))
+      {
+        if (!v_written)
+        {
+           // write vertices beginning with v
+          fs << "v ";
+          v_written = true;
+        }
+        float value;
+        memcpy (&value, &tex_mesh.cloud.data[i * point_size + tex_mesh.cloud.fields[d].offset], sizeof (float));
+        fs << value;
+        if (++xyz == 3)
+          continue;
+        fs << " ";
+      }
+	  else if(tex_mesh.cloud.fields[d].datatype == pcl::PCLPointField::FLOAT32 &&
+          	  tex_mesh.cloud.fields[d].name == "rgb")
+	  {
+		std::uint32_t rgb = *reinterpret_cast<const int*>(&tex_mesh.cloud.data[i * point_size + tex_mesh.cloud.fields[d].offset]);
+		std::uint8_t r = (rgb >> 16) & 0x0000ff;
+		std::uint8_t g = (rgb >> 8)  & 0x0000ff;
+		std::uint8_t b = (rgb)       & 0x0000ff;
+		fs << " " << float(r)/255.0f << " " << float(g)/255.0f << " " << float(b)/255.0f;
+		break;
+	  }
+    }
+    if (xyz != 3)
+    {
+      UERROR ("Input point cloud has no XYZ data!\n");
+      return (-2);
+    }
+    fs << '\n';
+  }
+  fs << "# "<< nr_points <<" vertices" << '\n';
+
+  // Write vertex normals
+  for (unsigned i = 0; i < nr_points; ++i)
+  {
+    int xyz = 0;
+    // "vn" just be written one
+    bool v_written = false;
+    for (std::size_t d = 0; d < tex_mesh.cloud.fields.size (); ++d)
+    {
+      // adding vertex
+      if ((tex_mesh.cloud.fields[d].datatype == pcl::PCLPointField::FLOAT32) && (
+          tex_mesh.cloud.fields[d].name == "normal_x" ||
+          tex_mesh.cloud.fields[d].name == "normal_y" ||
+          tex_mesh.cloud.fields[d].name == "normal_z"))
+      {
+    	  if (!v_written)
+    	  {
+          // write vertices beginning with vn
+          fs << "vn ";
+          v_written = true;
+    	  }
+        float value;
+        memcpy (&value, &tex_mesh.cloud.data[i * point_size + tex_mesh.cloud.fields[d].offset], sizeof (float));
+        fs << value;
+        if (++xyz == 3)
+          break;
+        fs << " ";
+      }
+    }
+    if (xyz != 3)
+    {
+      UERROR ("Input point cloud has no normals!\n");
+      return (-2);
+    }
+    fs << '\n';
+  }
+  // Write vertex texture with "vt" (adding latter)
+
+  for (unsigned m = 0; m < nr_meshes; ++m)
+  {
+    fs << "# " << tex_mesh.tex_coordinates[m].size() << " vertex textures in submesh " << m <<  '\n';
+    for (const auto &coordinate : tex_mesh.tex_coordinates[m])
+    {
+      fs << "vt ";
+      fs <<  coordinate[0] << " " << coordinate[1] << '\n';
+    }
+  }
+
+  unsigned f_idx = 0;
+
+  // int idx_vt =0;
+  for (unsigned m = 0; m < nr_meshes; ++m)
+  {
+    if (m > 0) f_idx += static_cast<unsigned> (tex_mesh.tex_polygons[m-1].size ());
+
+    fs << "# The material will be used for mesh " << m << '\n';
+    fs << "usemtl " <<  tex_mesh.tex_materials[m].tex_name << '\n';
+    fs << "# Faces" << '\n';
+
+    for (std::size_t i = 0; i < tex_mesh.tex_polygons[m].size(); ++i)
+    {
+      // Write faces with "f"
+      fs << "f";
+      // There's one UV per vertex per face, i.e., the same vertex can have
+      // different UV depending on the face.
+      for (std::size_t j = 0; j < tex_mesh.tex_polygons[m][i].vertices.size (); ++j)
+      {
+        std::uint32_t idx = tex_mesh.tex_polygons[m][i].vertices[j] + 1;
+        fs << " " << idx
+           << "/" << tex_mesh.tex_polygons[m][i].vertices.size () * (i+f_idx) +j+1
+           << "/" << idx; // vertex index in obj file format starting with 1
+      }
+      fs << '\n';
+    }
+    fs << "# "<< tex_mesh.tex_polygons[m].size() << " faces in mesh " << m << '\n';
+  }
+  fs << "# End of File" << std::flush;
+
+  // Close obj file
+  fs.close ();
+
+  /* Write material definition for OBJ file*/
+  // Open file
+
+  std::ofstream m_fs;
+  m_fs.precision (precision);
+  m_fs.open (mtl_file_name.c_str ());
+
+  // default
+  m_fs << "#" << '\n';
+  m_fs << "# Wavefront material file" << '\n';
+  m_fs << "#" << '\n';
+  for(unsigned m = 0; m < nr_meshes; ++m)
+  {
+    m_fs << "newmtl " << tex_mesh.tex_materials[m].tex_name << '\n';
+    m_fs << "Ka "<< tex_mesh.tex_materials[m].tex_Ka.r << " " << tex_mesh.tex_materials[m].tex_Ka.g << " " << tex_mesh.tex_materials[m].tex_Ka.b << '\n'; // defines the ambient color of the material to be (r,g,b).
+    m_fs << "Kd "<< tex_mesh.tex_materials[m].tex_Kd.r << " " << tex_mesh.tex_materials[m].tex_Kd.g << " " << tex_mesh.tex_materials[m].tex_Kd.b << '\n'; // defines the diffuse color of the material to be (r,g,b).
+    m_fs << "Ks "<< tex_mesh.tex_materials[m].tex_Ks.r << " " << tex_mesh.tex_materials[m].tex_Ks.g << " " << tex_mesh.tex_materials[m].tex_Ks.b << '\n'; // defines the specular color of the material to be (r,g,b). This color shows up in highlights.
+    m_fs << "d " << tex_mesh.tex_materials[m].tex_d << '\n'; // defines the transparency of the material to be alpha.
+    m_fs << "Ns "<< tex_mesh.tex_materials[m].tex_Ns  << '\n'; // defines the shininess of the material to be s.
+    m_fs << "illum "<< tex_mesh.tex_materials[m].tex_illum << '\n'; // denotes the illumination model used by the material.
+                                            // illum = 1 indicates a flat material with no specular highlights, so the value of Ks is not used.
+                                            // illum = 2 denotes the presence of specular highlights, and so a specification for Ks is required.
+    m_fs << "map_Kd " << tex_mesh.tex_materials[m].tex_file << '\n';
+    m_fs << "###" << '\n';
+  }
+  m_fs.close ();
+  return (0);
+}
+
+/**
+ * This is a modified copy of https://github.com/PointCloudLibrary/pcl/blob/pcl-1.12.1/io/src/obj_io.cpp
+ * with added color on each vertex if provided
+ */
+int saveOBJFile(
+	const std::string &file_name,
+	const pcl::PolygonMesh &mesh,
+	unsigned precision)
+{
+  if (mesh.cloud.data.empty ())
+  {
+    UERROR ("Input point cloud has no data!\n");
+    return (-1);
+  }
+  // Open file
+  std::ofstream fs;
+  fs.precision (precision);
+  fs.open (file_name.c_str ());
+
+  /* Write 3D information */
+  // number of points
+  int nr_points  = mesh.cloud.width * mesh.cloud.height;
+  // point size
+  unsigned point_size = static_cast<unsigned> (mesh.cloud.data.size () / nr_points);
+  // number of faces for header
+  unsigned nr_faces = static_cast<unsigned> (mesh.polygons.size ());
+  // Do we have vertices normals?
+  int normal_index = getFieldIndex (mesh.cloud, "normal_x");
+
+  // Write the header information
+  fs << "####" << '\n';
+  fs << "# OBJ dataFile simple version. File name: " << file_name << '\n';
+  fs << "# Vertices: " << nr_points << '\n';
+  if (normal_index != -1)
+    fs << "# Vertices normals : " << nr_points << '\n';
+  fs << "# Faces: " <<nr_faces << '\n';
+  fs << "####" << '\n';
+
+  // Write vertex coordinates
+  fs << "# List of Vertices, with (x,y,z) coordinates, w is optional." << '\n';
+  for (int i = 0; i < nr_points; ++i)
+  {
+    int xyz = 0;
+    for (std::size_t d = 0; d < mesh.cloud.fields.size (); ++d)
+    {
+      // adding vertex
+      if ((mesh.cloud.fields[d].datatype == pcl::PCLPointField::FLOAT32) && (
+          mesh.cloud.fields[d].name == "x" ||
+          mesh.cloud.fields[d].name == "y" ||
+          mesh.cloud.fields[d].name == "z"))
+      {
+        if (mesh.cloud.fields[d].name == "x")
+           // write vertices beginning with v
+          fs << "v ";
+
+        float value;
+        memcpy (&value, &mesh.cloud.data[i * point_size + mesh.cloud.fields[d].offset], sizeof (float));
+        fs << value;
+        if (++xyz == 3)
+          continue;
+        fs << " ";
+      }
+	  else if(mesh.cloud.fields[d].datatype == pcl::PCLPointField::FLOAT32 &&
+          	  mesh.cloud.fields[d].name == "rgb")
+	  {
+		std::uint32_t rgb = *reinterpret_cast<const int*>(&mesh.cloud.data[i * point_size + mesh.cloud.fields[d].offset]);
+		std::uint8_t r = (rgb >> 16) & 0x0000ff;
+		std::uint8_t g = (rgb >> 8)  & 0x0000ff;
+		std::uint8_t b = (rgb)       & 0x0000ff;
+		fs << " " << float(r)/255.0f << " " << float(g)/255.0f << " " << float(b)/255.0f;
+		break;
+	  }
+    }
+    if (xyz != 3)
+    {
+      UERROR ("Input point cloud has no XYZ data!\n");
+      return (-2);
+    }
+    fs << '\n';
+  }
+
+  fs << "# "<< nr_points <<" vertices" << '\n';
+
+  if(normal_index != -1)
+  {
+    fs << "# Normals in (x,y,z) form; normals might not be unit." <<  '\n';
+    // Write vertex normals
+    for (int i = 0; i < nr_points; ++i)
+    {
+      int nxyz = 0;
+      for (std::size_t d = 0; d < mesh.cloud.fields.size (); ++d)
+      {
+        // adding vertex
+        if ((mesh.cloud.fields[d].datatype == pcl::PCLPointField::FLOAT32) && (
+              mesh.cloud.fields[d].name == "normal_x" ||
+              mesh.cloud.fields[d].name == "normal_y" ||
+              mesh.cloud.fields[d].name == "normal_z"))
+        {
+          if (mesh.cloud.fields[d].name == "normal_x")
+            // write vertices beginning with vn
+            fs << "vn ";
+
+          float value;
+          memcpy (&value, &mesh.cloud.data[i * point_size + mesh.cloud.fields[d].offset], sizeof (float));
+          fs << value;
+          if (++nxyz == 3)
+            break;
+          fs << " ";
+        }
+      }
+      if (nxyz != 3)
+      {
+        UERROR ("Input point cloud has no normals!\n");
+        return (-2);
+      }
+      fs << '\n';
+    }
+
+    fs << "# "<< nr_points <<" vertices normals" << '\n';
+  }
+
+  fs << "# Face Definitions" << '\n';
+  // Write down faces
+  if(normal_index == -1)
+  {
+    for(unsigned i = 0; i < nr_faces; i++)
+    {
+      fs << "f ";      
+      for (std::size_t j = 0; j < mesh.polygons[i].vertices.size () - 1; ++j)
+        fs << mesh.polygons[i].vertices[j] + 1 << " ";
+      fs << mesh.polygons[i].vertices.back() + 1 << '\n';
+    }
+  }
+  else
+  {
+    for(unsigned i = 0; i < nr_faces; i++)
+    {
+      fs << "f ";
+      for (std::size_t j = 0; j < mesh.polygons[i].vertices.size () - 1; ++j)
+        fs << mesh.polygons[i].vertices[j] + 1 << "//" << mesh.polygons[i].vertices[j] + 1 << " ";
+      fs << mesh.polygons[i].vertices.back() + 1 << "//" << mesh.polygons[i].vertices.back() + 1 << '\n';
+    }
+  }
+  fs << "# End of File" << std::endl;
+
+  // Close obj file
+  fs.close ();
+  return 0;
 }
 
 }

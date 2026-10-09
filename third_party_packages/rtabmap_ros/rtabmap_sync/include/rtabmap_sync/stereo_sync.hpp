@@ -34,9 +34,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <image_transport/image_transport.hpp>
 #include <image_transport/subscriber_filter.hpp>
 
-#include <message_filters/sync_policies/approximate_time.h>
-#include <message_filters/sync_policies/exact_time.h>
-#include <message_filters/subscriber.h>
+#include <message_filters/sync_policies/approximate_time.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
+#include <message_filters/subscriber.hpp>
 
 #include "rtabmap_msgs/msg/rgbd_image.hpp"
 #include "rtabmap_sync/SyncDiagnostic.h"
@@ -44,6 +44,17 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace rtabmap_sync
 {
 
+/**
+ * @brief Groups a stereo pair's four topics into one `RGBDImage`.
+ *
+ * The left image goes in the color slot and the right image in the depth slot; what tells
+ * a consumer to read it as a stereo pair rather than as color plus depth is the baseline
+ * in the second calibration's P(0,3). Defaults to exact synchronization, since a stereo
+ * pair is normally hardware-triggered.
+ *
+ * See the [node documentation](https://github.com/introlab/rtabmap_ros/blob/ros2/rtabmap_sync/doc/stereo_sync.md)
+ * for topics and parameters.
+ */
 class StereoSync : public rclcpp::Node
 {
 public:
@@ -59,6 +70,10 @@ public:
 			  const sensor_msgs::msg::CameraInfo::ConstSharedPtr cameraInfoRight);
 private:
 	double compressedRate_;
+	double approxSyncMaxInterval_;
+	/// Stamp of the last compressed message published, for compressed_rate throttling.
+	/// Explicitly on the ROS clock: the default is the system clock, and rclcpp refuses
+	/// to compare two times that do not come from the same source.
 	rclcpp::Time lastCompressedPublished_;
 
 	rclcpp::Publisher<rtabmap_msgs::msg::RGBDImage>::SharedPtr rgbdImagePub_;

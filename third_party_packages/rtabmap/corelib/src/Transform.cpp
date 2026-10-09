@@ -52,6 +52,26 @@ Transform::Transform(
 			r11, r12, r13, o14,
 			r21, r22, r23, o24,
 			r31, r32, r33, o34);
+
+	if( r11>0.0f || r12>0.0f || r13>0.0f ||
+		r21>0.0f || r22>0.0f || r23>0.0f ||
+		r31>0.0f || r32>0.0f || r33>0.0f)
+	{
+		Eigen::Matrix3f m;
+		m << r11, r12, r13,
+			r21, r22, r23,
+			r31, r32, r33;
+		float d = m.determinant();
+		if(fabs(d-1.0f) > 0.0001)
+		{
+			UWARN("Created transform doesn't have normalized rotation. Any transformation with this transform can cause unexpected results!"
+				" Determinant([%f %f %f;%f %f %f;%f %f %f])=%f",
+				r11, r12, r13,
+				r21, r22, r23,
+				r31, r32, r33,
+				d);
+		}
+	}
 }
 
 Transform::Transform(const cv::Mat & transformationMatrix)
@@ -273,11 +293,9 @@ void Transform::getTranslation(float & x, float & y, float & z) const
 	z = this->z();
 }
 
-float Transform::getAngle(float x, float y, float z) const
+float Transform::getAngle(const Transform & t) const
 {
-	Eigen::Vector3f vA(x,y,z);
-	Eigen::Vector3f vB = this->toEigen3f().linear()*Eigen::Vector3f(1,0,0);
-	return pcl::getAngle3D(Eigen::Vector4f(vA[0], vA[1], vA[2], 0), Eigen::Vector4f(vB[0], vB[1], vB[2], 0));
+	return getQuaternionf().angularDistance(t.getQuaternionf());
 }
 
 float Transform::getNorm() const
@@ -511,6 +529,11 @@ Transform Transform::fromString(const std::string & string)
 					  numbers[4], numbers[5], numbers[6], numbers[7],
 					  numbers[8], numbers[9], numbers[10], numbers[11]);
 	}
+	// Always normalize
+	if(!t.isNull())
+	{
+		t.normalizeRotation();
+	}
 	return t;
 }
 
@@ -532,35 +555,35 @@ Transform Transform::getTransform(
 				const double & stamp)
 {
 	UASSERT(!tfBuffer.empty());
-	std::map<double, Transform>::const_iterator imuIterB = tfBuffer.lower_bound(stamp);
-	std::map<double, Transform>::const_iterator imuIterA = imuIterB;
-	if(imuIterA != tfBuffer.begin())
+	std::map<double, Transform>::const_iterator iterB = tfBuffer.lower_bound(stamp);
+	std::map<double, Transform>::const_iterator iterA = iterB;
+	if(iterA != tfBuffer.begin())
 	{
-		imuIterA = --imuIterA;
+		iterA = --iterA;
 	}
-	if(imuIterB == tfBuffer.end())
+	if(iterB == tfBuffer.end())
 	{
-		imuIterB = --imuIterB;
+		iterB = --iterB;
 	}
-	Transform imuT;
-	if(imuIterB->first == stamp)
+	Transform t;
+	if(iterB->first == stamp)
 	{
-		imuT = imuIterB->second;
+		t = iterB->second;
 	}
-	else if(imuIterA != imuIterB)
+	else if(iterA != iterB)
 	{
 		//interpolate:
-		imuT = imuIterA->second.interpolate((stamp-imuIterA->first) / (imuIterB->first-imuIterA->first), imuIterB->second);
+		t = iterA->second.interpolate((stamp-iterA->first) / (iterB->first-iterA->first), iterB->second);
 	}
-	else if(stamp > imuIterB->first)
+	else if(stamp > iterB->first)
 	{
-		UWARN("No transform found for stamp %f! Latest is %f", stamp, imuIterB->first);
+		UWARN("No transform found for stamp %f! Latest is %f", stamp, iterB->first);
 	}
 	else
 	{
-		UWARN("No transform found for stamp %f! Earliest is %f", stamp, imuIterA->first);
+		UWARN("No transform found for stamp %f! Earliest is %f", stamp, iterA->first);
 	}
-	return imuT;
+	return t;
 }
 
 Transform Transform::getClosestTransform(

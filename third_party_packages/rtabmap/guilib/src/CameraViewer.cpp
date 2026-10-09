@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/gui/CloudViewer.h>
 #include <rtabmap/utilite/UCv2Qt.h>
 #include <rtabmap/utilite/ULogger.h>
+#include <rtabmap/utilite/UTimer.h>
 #include <QtCore/QMetaType>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -54,7 +55,9 @@ CameraViewer::CameraViewer(QWidget * parent, const ParametersMap & parameters) :
 	cloudView_(new CloudViewer(this)),
 	processingImages_(false),
 	parameters_(parameters),
-	markerDetector_(0)
+	markerDetector_(0),
+	lastCapturePeriod_(0.0),
+	previousCaptureStamp_(0.0)
 {
 	qRegisterMetaType<rtabmap::SensorData>("rtabmap::SensorData");
 
@@ -82,7 +85,7 @@ CameraViewer::CameraViewer(QWidget * parent, const ParametersMap & parameters) :
 	showScanCheckbox_->setChecked(true);
 
 	markerCheckbox_ = new QCheckBox("Detect markers", this);
-#ifdef HAVE_OPENCV_ARUCO
+#if ((CV_MAJOR_VERSION > 4 || (CV_MAJOR_VERSION==4 && CV_MINOR_VERSION >=7)) && defined(HAVE_OPENCV_OBJDETECT)) || defined(HAVE_OPENCV_ARUCO) || defined(RTABMAP_APRILTAG)
 	markerCheckbox_->setEnabled(true);
 	markerDetector_ = new MarkerDetector(parameters);
 #else
@@ -115,6 +118,7 @@ CameraViewer::CameraViewer(QWidget * parent, const ParametersMap & parameters) :
 	vlayout->addLayout(layout2);
 
 	this->setLayout(vlayout);
+	fpsTimer_.start();
 }
 
 CameraViewer::~CameraViewer()
@@ -132,9 +136,24 @@ void CameraViewer::showImage(const rtabmap::SensorData & data)
 {
 	processingImages_ = true;
 	QString sizes;
-	imageView_->setVisible(!data.imageRaw().empty() || !data.imageRaw().empty());
+
+	cv::Mat left;
+	cv::Mat depthOrRight;
+	LaserScan scan;
+	if( !data.imageRaw().empty() || !data.imageCompressed().empty() ||
+		!data.depthOrRightRaw().empty() || !data.depthOrRightCompressed().empty() ||
+		!data.laserScanRaw().empty() || !data.laserScanCompressed().empty())
+	{
+		data.uncompressDataConst(
+			!data.imageRaw().empty() || !data.imageCompressed().empty()?&left:0, 
+			!data.depthOrRightRaw().empty() || !data.depthOrRightCompressed().empty()?&depthOrRight:0,
+			!data.laserScanRaw().empty() || !data.laserScanCompressed().empty()?&scan:0);
+	}
+
+	imageView_->setVisible(!left.empty() || !left.empty());
 	std::map<int, MarkerInfo> detections;
-	if(!data.imageRaw().empty())
+	UTimer markerDetectionTime;
+	if(!left.empty())
 	{
 		std::vector<CameraModel> models;
 		if(markerCheckbox_->isEnabled() && markerCheckbox_->isChecked())
@@ -148,40 +167,78 @@ void CameraViewer::showImage(const rtabmap::SensorData & data)
 				}
 			}
 		}
+		else
+		{
+			_landmarksSize.clear();
+		}
 			
 		if(!models.empty() && models[0].isValidForProjection())
 		{
 			cv::Mat imageWithDetections;
-			detections = markerDetector_->detect(data.imageRaw(), models, data.depthRaw(), std::map<int, float>(), &imageWithDetections);
+			cv::Mat depth = (depthOrRight.type()==CV_16UC1 || depthOrRight.type()==CV_32FC1) ? depthOrRight : cv::Mat();
+			detections = markerDetector_->detect(left, models, depth, _landmarksSize, &imageWithDetections);
 			imageView_->setImage(uCvMat2QImage(imageWithDetections));
+			for(std::map<int, MarkerInfo>::iterator iter=detections.begin(); iter!=detections.end(); ++iter)
+			{
+				if(iter->second.length() > 0.0f) {
+					_landmarksSize.insert(std::make_pair(iter->first, iter->second.length()));
+				}
+			}
 		}
 		else
 		{
-			imageView_->setImage(uCvMat2QImage(data.imageRaw()));
+			imageView_->setImage(uCvMat2QImage(left));
 		}
-		sizes.append(QString("Color=%1x%2").arg(data.imageRaw().cols).arg(data.imageRaw().rows));
+		sizes.append(QString("Color=%1x%2").arg(left.cols).arg(left.rows));
 	}
-	if(!data.depthOrRightRaw().empty())
+	if(!depthOrRight.empty())
 	{
-		imageView_->setImageDepth(data.depthOrRightRaw());
-		sizes.append(QString(" Depth=%1x%2").arg(data.depthOrRightRaw().cols).arg(data.depthOrRightRaw().rows));
+		imageView_->setImageDepth(depthOrRight);
+		sizes.append(QString(" Depth=%1x%2").arg(depthOrRight.cols).arg(depthOrRight.rows));
+	}
+	sizes.append(QString(" FPS capture=%1 render=%2").arg(lastCapturePeriod_>0.0?(int)round(1.0/lastCapturePeriod_):0).arg((int)round(1.0/fpsTimer_.restart()*1000)));
+	if(markerCheckbox_->isEnabled() && markerCheckbox_->isChecked())
+	{
+		sizes.append(QString(" Marker=%1ms").arg(int(markerDetectionTime.ticks()*1000)));
 	}
 	imageSizeLabel_->setText(sizes);
 
-	if(!data.depthOrRightRaw().empty() &&
+	if(!depthOrRight.empty() &&
 	   ((data.stereoCameraModels().size() && data.stereoCameraModels()[0].isValidForProjection()) || (data.cameraModels().size() && data.cameraModels().at(0).isValidForProjection())))
 	{
 		if(showCloudCheckbox_->isChecked())
 		{
-			if(!data.imageRaw().empty() && !data.depthOrRightRaw().empty())
+			if(!left.empty() && !depthOrRight.empty())
 			{
 				showCloudCheckbox_->setEnabled(true);
-				cloudView_->addCloud("cloud", util3d::cloudRGBFromSensorData(data, decimationSpin_->value()!=0?decimationSpin_->value():1, 0, 0, 0, parameters_));
+				if(data.imageRaw().empty())
+				{
+					if(!data.stereoCameraModels().empty())
+					{
+						cloudView_->addCloud("cloud", util3d::cloudRGBFromSensorData(SensorData(left, depthOrRight, data.stereoCameraModels()), decimationSpin_->value()!=0?decimationSpin_->value():1, 0, 0, 0, parameters_));
+					}
+					else
+					{
+						cloudView_->addCloud("cloud", util3d::cloudRGBFromSensorData(SensorData(left, depthOrRight, data.cameraModels()), decimationSpin_->value()!=0?decimationSpin_->value():1, 0, 0, 0, parameters_));
+					}
+					
+				}
+				else
+				{
+					cloudView_->addCloud("cloud", util3d::cloudRGBFromSensorData(data, decimationSpin_->value()!=0?decimationSpin_->value():1, 0, 0, 0, parameters_));
+				}
 			}
-			else if(!data.depthOrRightRaw().empty())
+			else if(!depthOrRight.empty())
 			{
 				showCloudCheckbox_->setEnabled(true);
-				cloudView_->addCloud("cloud", util3d::cloudFromSensorData(data, decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1, 0, 0, 0, parameters_));
+				if(data.depthOrRightRaw().empty())
+				{
+					cloudView_->addCloud("cloud", util3d::cloudFromSensorData(SensorData(cv::Mat(), depthOrRight, data.cameraModels()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1, 0, 0, 0, parameters_));
+				}
+				else
+				{
+					cloudView_->addCloud("cloud", util3d::cloudFromSensorData(data, decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1, 0, 0, 0, parameters_));
+				}
 			}
 
 			// Add landmarks to 3D Map view
@@ -196,7 +253,7 @@ void CameraViewer::showImage(const rtabmap::SensorData & data)
 #if PCL_VERSION_COMPARE(>=, 1, 7, 2)
 					cloudView_->addOrUpdateCoordinate(uFormat("landmark_%d", iter->first), iter->second.pose(), iter->second.length(), false);
 #endif
-					std::string num = uNumber2Str(iter->first);
+					std::string num = uFormat("%d (%.1f cm)", iter->first, iter->second.length()*100.0f);
 					cloudView_->addOrUpdateText(
 							std::string("landmark_str_") + num,
 							num,
@@ -208,37 +265,37 @@ void CameraViewer::showImage(const rtabmap::SensorData & data)
 		}
 	}
 
-	if(!data.laserScanRaw().isEmpty())
+	if(!scan.isEmpty())
 	{
 		showScanCheckbox_->setEnabled(true);
 		if(showScanCheckbox_->isChecked())
 		{
-			if(data.laserScanRaw().hasNormals())
+			if(scan.hasNormals())
 			{
-				if(data.laserScanRaw().hasIntensity())
+				if(scan.hasIntensity())
 				{
-					cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudINormal(data.laserScanRaw()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), data.laserScanRaw().localTransform(), Qt::yellow);
+					cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudINormal(scan), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), scan.localTransform(), Qt::yellow);
 				}
-				else if(data.laserScanRaw().hasRGB())
+				else if(scan.hasRGB())
 				{
-					cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudRGBNormal(data.laserScanRaw()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), data.laserScanRaw().localTransform(), Qt::yellow);
+					cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudRGBNormal(scan), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), scan.localTransform(), Qt::yellow);
 				}
 				else
 				{
-					cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudNormal(data.laserScanRaw()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), data.laserScanRaw().localTransform(), Qt::yellow);
+					cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudNormal(scan), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), scan.localTransform(), Qt::yellow);
 				}
 			}
-			else if(data.laserScanRaw().hasIntensity())
+			else if(scan.hasIntensity())
 			{
-				cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudI(data.laserScanRaw()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), data.laserScanRaw().localTransform(), Qt::yellow);
+				cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudI(scan), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), scan.localTransform(), Qt::yellow);
 			}
-			else if(data.laserScanRaw().hasRGB())
+			else if(scan.hasRGB())
 			{
-				cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudRGB(data.laserScanRaw()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), data.laserScanRaw().localTransform(), Qt::yellow);
+				cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloudRGB(scan), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), scan.localTransform(), Qt::yellow);
 			}
 			else
 			{
-				cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloud(data.laserScanRaw()), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), data.laserScanRaw().localTransform(), Qt::yellow);
+				cloudView_->addCloud("scan", util3d::downsample(util3d::laserScanToPointCloud(scan), decimationSpin_->value()!=0?fabs(decimationSpin_->value()):1), scan.localTransform(), Qt::yellow);
 			}
 		}
 	}
@@ -272,6 +329,8 @@ bool CameraViewer::handleEvent(UEvent * event)
 			{
 				if(camEvent->data().isValid())
 				{
+					lastCapturePeriod_ = camEvent->data().stamp() - previousCaptureStamp_;
+					previousCaptureStamp_ = camEvent->data().stamp();
 					if(!processingImages_ && this->isVisible() && camEvent->data().isValid())
 					{
 						processingImages_ = true;

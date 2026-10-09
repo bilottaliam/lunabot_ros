@@ -36,6 +36,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace rtabmap
 {
 
+namespace {
+bool isOccupancyGridLayerFormatSupported(const cv::Mat & layer)
+{
+	if(layer.empty())
+	{
+		return true;
+	}
+	return layer.type() == CV_32FC2 ||
+			layer.type() == CV_32FC3 ||
+			layer.type() == CV_32FC(4) ||
+			layer.type() == CV_32FC(5) ||
+			layer.type() == CV_32FC(6) ||
+			layer.type() == CV_32FC(7) ||
+			(layer.type() == CV_8UC1 && layer.rows == 1);
+}
+} // namespace
+
 // empty constructor
 SensorData::SensorData() :
 		_id(0),
@@ -89,6 +106,23 @@ SensorData::SensorData(
 	setUserData(userData);
 }
 
+// RGB-D constructor + Depth confidence
+SensorData::SensorData(
+		const cv::Mat & rgb,
+		const cv::Mat & depth,
+		const cv::Mat & depth_confidence,
+		const CameraModel & cameraModel,
+		int id,
+		double stamp,
+		const cv::Mat & userData) :
+		_id(id),
+		_stamp(stamp),
+		_cellSize(0.0f)
+{
+	setRGBDImage(rgb, depth, depth_confidence, cameraModel);
+	setUserData(userData);
+}
+
 // RGB-D constructor + laser scan
 SensorData::SensorData(
 		const LaserScan & laserScan,
@@ -103,6 +137,25 @@ SensorData::SensorData(
 		_cellSize(0.0f)
 {
 	setRGBDImage(rgb, depth, cameraModel);
+	setLaserScan(laserScan);
+	setUserData(userData);
+}
+
+// RGB-D constructor + confidence + laser scan
+SensorData::SensorData(
+		const LaserScan & laserScan,
+		const cv::Mat & rgb,
+		const cv::Mat & depth,
+		const cv::Mat & depthConfidence,
+		const CameraModel & cameraModel,
+		int id,
+		double stamp,
+		const cv::Mat & userData) :
+		_id(id),
+		_stamp(stamp),
+		_cellSize(0.0f)
+{
+	setRGBDImage(rgb, depth, depthConfidence, cameraModel);
 	setLaserScan(laserScan);
 	setUserData(userData);
 }
@@ -123,6 +176,23 @@ SensorData::SensorData(
 	setUserData(userData);
 }
 
+// Multi-cameras RGB-D constructor + confidence
+SensorData::SensorData(
+		const cv::Mat & rgb,
+		const cv::Mat & depth,
+		const cv::Mat & depthConfidence,
+		const std::vector<CameraModel> & cameraModels,
+		int id,
+		double stamp,
+		const cv::Mat & userData) :
+		_id(id),
+		_stamp(stamp),
+		_cellSize(0.0f)
+{
+	setRGBDImage(rgb, depth, depthConfidence, cameraModels);
+	setUserData(userData);
+}
+
 // Multi-cameras RGB-D constructor + laser scan
 SensorData::SensorData(
 		const LaserScan & laserScan,
@@ -137,6 +207,25 @@ SensorData::SensorData(
 		_cellSize(0.0f)
 {
 	setRGBDImage(rgb, depth, cameraModels);
+	setLaserScan(laserScan);
+	setUserData(userData);
+}
+
+// Multi-cameras RGB-D constructor + confidence + laser scan
+SensorData::SensorData(
+		const LaserScan & laserScan,
+		const cv::Mat & rgb,
+		const cv::Mat & depth,
+		const cv::Mat & depthConfidence,
+		const std::vector<CameraModel> & cameraModels,
+		int id,
+		double stamp,
+		const cv::Mat & userData) :
+		_id(id),
+		_stamp(stamp),
+		_cellSize(0.0f)
+{
+	setRGBDImage(rgb, depth, depthConfidence, cameraModels);
 	setLaserScan(laserScan);
 	setUserData(userData);
 }
@@ -235,8 +324,28 @@ void SensorData::setRGBDImage(
 	setRGBDImage(rgb, depth, models, clearPreviousData);
 }
 void SensorData::setRGBDImage(
+	const cv::Mat & rgb,
+	const cv::Mat & depth,
+	const cv::Mat & depthConfidence,
+	const CameraModel & model,
+	bool clearPreviousData)
+{
+	std::vector<CameraModel> models;
+	models.push_back(model);
+	setRGBDImage(rgb, depth, depthConfidence, models, clearPreviousData);
+}
+void SensorData::setRGBDImage(
+	const cv::Mat & rgb,
+	const cv::Mat & depth,
+	const std::vector<CameraModel> & models,
+	bool clearPreviousData)
+{
+	setRGBDImage(rgb, depth, cv::Mat(), models, clearPreviousData);
+}
+void SensorData::setRGBDImage(
 		const cv::Mat & rgb,
 		const cv::Mat & depth,
+		const cv::Mat & depthConfidence,
 		const std::vector<CameraModel> & models,
 		bool clearPreviousData)
 {
@@ -299,6 +408,30 @@ void SensorData::setRGBDImage(
 	{
 		_depthOrRightRaw = cv::Mat();
 		_depthOrRightCompressed = cv::Mat();
+	}
+
+	if(depthConfidence.rows == 1)
+	{
+		UASSERT(depthConfidence.type() == CV_8UC1); // Bytes
+		_depthConfidenceCompressed = depthConfidence;
+		if(clearData)
+		{
+			_depthConfidenceRaw = cv::Mat();
+		}
+	}
+	else if(!depthConfidence.empty())
+	{
+		UASSERT(depthConfidence.type() == CV_8UC1);
+		_depthConfidenceRaw = depthConfidence;
+		if(clearData)
+		{
+			_depthConfidenceCompressed = cv::Mat();
+		}
+	}
+	else if(clearData)
+	{
+		_depthConfidenceRaw = cv::Mat();
+		_depthConfidenceCompressed = cv::Mat();
 	}
 }
 void SensorData::setStereoImage(
@@ -365,7 +498,8 @@ void SensorData::setStereoImage(
 	}
 	else if(!right.empty())
 	{
-		UASSERT(right.type() == CV_8UC1); // Mono
+		UASSERT(right.type() == CV_8UC1 || // Mono
+				right.type() == CV_8UC3);  // RGB
 		_depthOrRightRaw = right;
 		if(clearData)
 		{
@@ -434,7 +568,7 @@ void SensorData::setUserData(const cv::Mat & userData, bool clearPreviousData)
 	else
 	{
 		_userDataRaw = userData;
-		if(!userData.empty())
+		if(!userData.empty() && _userDataCompressed.empty())
 		{
 			_userDataCompressed = compressData2(userData);
 		}
@@ -448,12 +582,12 @@ void SensorData::setOccupancyGrid(
 			float cellSize,
 			const cv::Point3f & viewPoint)
 {
-	UDEBUG("ground=%d obstacles=%d empty=%d", ground.cols, obstacles.cols, empty.cols);
+	//UDEBUG("ground=%d obstacles=%d empty=%d", ground.cols, obstacles.cols, empty.cols);
 	if((!ground.empty() && (!_groundCellsCompressed.empty() || !_groundCellsRaw.empty())) ||
 	   (!obstacles.empty() && (!_obstacleCellsCompressed.empty() || !_obstacleCellsRaw.empty())) ||
 	   (!empty.empty() && (!_emptyCellsCompressed.empty() || !_emptyCellsRaw.empty())))
 	{
-		UWARN("Occupancy grid cannot be overwritten! id=%d, Set occupancy grid of %d to null "
+		UWARN("Occupancy grid cannot be overwritten! Set occupancy grid of %d to null "
 			  "before setting a new one.", this->id());
 		return;
 	}
@@ -464,6 +598,19 @@ void SensorData::setOccupancyGrid(
 	_obstacleCellsCompressed = cv::Mat();
 	_emptyCellsRaw = cv::Mat();
 	_emptyCellsCompressed = cv::Mat();
+
+	if(!ground.empty() && !isOccupancyGridLayerFormatSupported(ground))
+	{
+		UFATAL("Unsupported local occupancy grid format for ground cells: OpenCV type=%d size=%dx%d", ground.type(), ground.cols, ground.rows);
+	}
+	if(!obstacles.empty() && !isOccupancyGridLayerFormatSupported(obstacles))
+	{
+		UFATAL("Unsupported local occupancy grid format for obstacle cells: OpenCV type=%d size=%dx%d", obstacles.type(), obstacles.cols, obstacles.rows);
+	}
+	if(!empty.empty() && !isOccupancyGridLayerFormatSupported(empty))
+	{
+		UFATAL("Unsupported local occupancy grid format for empty cells: OpenCV type=%d size=%dx%d", empty.type(), empty.cols, empty.rows);
+	}
 
 	CompressionThread ctGround(ground);
 	CompressionThread ctObstacles(obstacles);
@@ -476,7 +623,7 @@ void SensorData::setOccupancyGrid(
 			_groundCellsRaw = ground;
 			ctGround.start();
 		}
-		else if(ground.type() == CV_8UC1)
+		else // CV_8UC1 && rows == 1
 		{
 			_groundCellsCompressed = ground;
 		}
@@ -488,7 +635,7 @@ void SensorData::setOccupancyGrid(
 			_obstacleCellsRaw = obstacles;
 			ctObstacles.start();
 		}
-		else if(obstacles.type() == CV_8UC1)
+		else // CV_8UC1 && rows == 1
 		{
 			_obstacleCellsCompressed = obstacles;
 		}
@@ -500,7 +647,7 @@ void SensorData::setOccupancyGrid(
 			_emptyCellsRaw = empty;
 			ctEmpty.start();
 		}
-		else if(empty.type() == CV_8UC1)
+		else // CV_8UC1 && rows == 1
 		{
 			_emptyCellsCompressed = empty;
 		}
@@ -527,7 +674,7 @@ void SensorData::setOccupancyGrid(
 
 void SensorData::uncompressData()
 {
-	cv::Mat tmpA, tmpB, tmpD, tmpE, tmpF, tmpG;
+	cv::Mat tmpA, tmpB, tmpD, tmpE, tmpF, tmpG, tmpH;
 	LaserScan tmpC;
 	uncompressData(_imageCompressed.empty()?0:&tmpA,
 				_depthOrRightCompressed.empty()?0:&tmpB,
@@ -535,7 +682,8 @@ void SensorData::uncompressData()
 				_userDataCompressed.empty()?0:&tmpD,
 				_groundCellsCompressed.empty()?0:&tmpE,
 				_obstacleCellsCompressed.empty()?0:&tmpF,
-				_emptyCellsCompressed.empty()?0:&tmpG);
+				_emptyCellsCompressed.empty()?0:&tmpG,
+				_depthConfidenceCompressed.empty()?0:&tmpH);
 }
 
 void SensorData::uncompressData(
@@ -545,16 +693,27 @@ void SensorData::uncompressData(
 		cv::Mat * userDataRaw,
 		cv::Mat * groundCellsRaw,
 		cv::Mat * obstacleCellsRaw,
-		cv::Mat * emptyCellsRaw)
+		cv::Mat * emptyCellsRaw,
+		cv::Mat * depthConfidenceRaw)
 {
-	UDEBUG("%d data(%d,%d,%d,%d,%d,%d,%d)", this->id(), imageRaw?1:0, depthRaw?1:0, laserScanRaw?1:0, userDataRaw?1:0, groundCellsRaw?1:0, obstacleCellsRaw?1:0, emptyCellsRaw?1:0);
+	/*UDEBUG("%d data(%d,%d,%d,%d,%d,%d,%d,%d)", 
+		this->id(),
+		imageRaw?1:0,
+		depthRaw?1:0,
+		laserScanRaw?1:0,
+		userDataRaw?1:0,
+		groundCellsRaw?1:0,
+		obstacleCellsRaw?1:0, 
+		emptyCellsRaw?1:0,
+		depthConfidenceRaw?1:0);*/
 	if(imageRaw == 0 &&
 		depthRaw == 0 &&
 		laserScanRaw == 0 &&
 		userDataRaw == 0 &&
 		groundCellsRaw == 0 &&
 		obstacleCellsRaw == 0 &&
-		emptyCellsRaw == 0)
+		emptyCellsRaw == 0 &&
+		depthConfidenceRaw == 0)
 	{
 		return;
 	}
@@ -565,7 +724,8 @@ void SensorData::uncompressData(
 			userDataRaw,
 			groundCellsRaw,
 			obstacleCellsRaw,
-			emptyCellsRaw);
+			emptyCellsRaw,
+			depthConfidenceRaw);
 
 	if(imageRaw && !imageRaw->empty() && _imageRaw.empty())
 	{
@@ -586,6 +746,10 @@ void SensorData::uncompressData(
 	if(depthRaw && !depthRaw->empty() && _depthOrRightRaw.empty())
 	{
 		_depthOrRightRaw = *depthRaw;
+	}
+	if(depthConfidenceRaw && !depthConfidenceRaw->empty() && _depthConfidenceRaw.empty())
+	{
+		_depthConfidenceRaw = *depthConfidenceRaw;
 	}
 	if(laserScanRaw && !laserScanRaw->isEmpty() && _laserScanRaw.isEmpty())
 	{
@@ -627,7 +791,8 @@ void SensorData::uncompressDataConst(
 		cv::Mat * userDataRaw,
 		cv::Mat * groundCellsRaw,
 		cv::Mat * obstacleCellsRaw,
-		cv::Mat * emptyCellsRaw) const
+		cv::Mat * emptyCellsRaw,
+		cv::Mat * depthConfidenceRaw) const
 {
 	if(imageRaw)
 	{
@@ -636,6 +801,10 @@ void SensorData::uncompressDataConst(
 	if(depthRaw)
 	{
 		*depthRaw = _depthOrRightRaw;
+	}
+	if(depthConfidenceRaw)
+	{
+		*depthConfidenceRaw = _depthConfidenceRaw;
 	}
 	if(laserScanRaw)
 	{
@@ -659,6 +828,7 @@ void SensorData::uncompressDataConst(
 	}
 	if( (imageRaw && imageRaw->empty()) ||
 		(depthRaw && depthRaw->empty()) ||
+		(depthConfidenceRaw && depthConfidenceRaw->empty()) ||
 		(laserScanRaw && laserScanRaw->isEmpty()) ||
 		(userDataRaw && userDataRaw->empty()) ||
 		(groundCellsRaw && groundCellsRaw->empty()) ||
@@ -667,6 +837,7 @@ void SensorData::uncompressDataConst(
 	{
 		rtabmap::CompressionThread ctImage(_imageCompressed, true);
 		rtabmap::CompressionThread ctDepth(_depthOrRightCompressed, true);
+		rtabmap::CompressionThread ctDepthConfidence(_depthConfidenceCompressed, false);
 		rtabmap::CompressionThread ctLaserScan(_laserScanCompressed.data(), false);
 		rtabmap::CompressionThread ctUserData(_userDataCompressed, false);
 		rtabmap::CompressionThread ctGroundCells(_groundCellsCompressed, false);
@@ -681,6 +852,11 @@ void SensorData::uncompressDataConst(
 		{
 			UASSERT(_depthOrRightCompressed.type() == CV_8UC1);
 			ctDepth.start();
+		}
+		if(depthConfidenceRaw && depthConfidenceRaw->empty() && !_depthConfidenceCompressed.empty())
+		{
+			UASSERT(_depthConfidenceCompressed.type() == CV_8UC1);
+			ctDepthConfidence.start();
 		}
 		if(laserScanRaw && laserScanRaw->isEmpty() && !_laserScanCompressed.isEmpty())
 		{
@@ -709,6 +885,7 @@ void SensorData::uncompressDataConst(
 		}
 		ctImage.join();
 		ctDepth.join();
+		ctDepthConfidence.join();
 		ctLaserScan.join();
 		ctUserData.join();
 		ctGroundCells.join();
@@ -742,6 +919,21 @@ void SensorData::uncompressDataConst(
 				else
 				{
 					UERROR("Requested depth/right image data, but failed to uncompress (%d).", this->id());
+				}
+			}
+		}
+		if(depthConfidenceRaw && depthConfidenceRaw->empty())
+		{
+			*depthConfidenceRaw = ctDepthConfidence.getUncompressedData();
+			if(depthConfidenceRaw->empty())
+			{
+				if(_depthConfidenceCompressed.empty())
+				{
+					UWARN("Requested depth confidence data, but the sensor data (%d) doesn't have depth confidence.", this->id());
+				}
+				else
+				{
+					UERROR("Requested depth confidence data, but failed to uncompress (%d).", this->id());
 				}
 			}
 		}
@@ -807,6 +999,22 @@ void SensorData::setFeatures(const std::vector<cv::KeyPoint> & keypoints, const 
 	_descriptors = descriptors;
 }
 
+void SensorData::setIMU(const IMU & imu)
+{
+	UASSERT(
+		uIsFinite(imu.orientation()[0]) && 
+		uIsFinite(imu.orientation()[1]) && 
+		uIsFinite(imu.orientation()[2]) && 
+		uIsFinite(imu.orientation()[3]) &&
+		uIsFinite(imu.angularVelocity()[0]) && 
+		uIsFinite(imu.angularVelocity()[1]) && 
+		uIsFinite(imu.angularVelocity()[2]) && 
+		uIsFinite(imu.linearAcceleration()[0]) &&
+		uIsFinite(imu.linearAcceleration()[1]) &&
+		uIsFinite(imu.linearAcceleration()[2]));
+	imu_ = imu;
+}
+
 unsigned long SensorData::getMemoryUsed() const // Return memory usage in Bytes
 {
 	return sizeof(SensorData) +
@@ -814,6 +1022,8 @@ unsigned long SensorData::getMemoryUsed() const // Return memory usage in Bytes
 			(_imageRaw.empty()?0:_imageRaw.total()*_imageRaw.elemSize()) +
 			(_depthOrRightCompressed.empty()?0:_depthOrRightCompressed.total()*_depthOrRightCompressed.elemSize()) +
 			(_depthOrRightRaw.empty()?0:_depthOrRightRaw.total()*_depthOrRightRaw.elemSize()) +
+			(_depthConfidenceCompressed.empty()?0:_depthConfidenceCompressed.total()*_depthConfidenceCompressed.elemSize()) +
+			(_depthConfidenceRaw.empty()?0:_depthConfidenceRaw.total()*_depthConfidenceRaw.elemSize()) +
 			(_userDataCompressed.empty()?0:_userDataCompressed.total()*_userDataCompressed.elemSize()) +
 			(_userDataRaw.empty()?0:_userDataRaw.total()*_userDataRaw.elemSize()) +
 			(_laserScanCompressed.empty()?0:_laserScanCompressed.data().total()*_laserScanCompressed.data().elemSize()) +
@@ -829,12 +1039,13 @@ unsigned long SensorData::getMemoryUsed() const // Return memory usage in Bytes
 			(_descriptors.empty()?0:_descriptors.total()*_descriptors.elemSize());
 }
 
-void SensorData::clearCompressedData(bool images, bool scan, bool userData)
+void SensorData::clearCompressedData(bool images, bool scan, bool userData, bool occupancyGrid)
 {
 	if(images)
 	{
 		_imageCompressed=cv::Mat();
 		_depthOrRightCompressed=cv::Mat();
+		_depthConfidenceCompressed=cv::Mat();
 	}
 	if(scan)
 	{
@@ -844,13 +1055,32 @@ void SensorData::clearCompressedData(bool images, bool scan, bool userData)
 	{
 		_userDataCompressed=cv::Mat();
 	}
+	if(occupancyGrid)
+	{
+		_groundCellsCompressed=cv::Mat();
+		_emptyCellsCompressed=cv::Mat();
+		_obstacleCellsCompressed=cv::Mat();
+		
+		if( _groundCellsCompressed.empty()  && _groundCellsRaw.empty() &&
+			_obstacleCellsCompressed.empty()  && _obstacleCellsRaw.empty() &&
+			_emptyCellsCompressed.empty()  && _emptyCellsRaw.empty())
+		{
+			_cellSize = 0.0f;
+			_viewPoint = cv::Point3f();
+		}
+	}
 }
-void SensorData::clearRawData(bool images, bool scan, bool userData)
+void SensorData::clearRawData(bool images, bool scan, bool userData, bool occupancyGrid)
 {
 	if(images)
 	{
 		_imageRaw=cv::Mat();
 		_depthOrRightRaw=cv::Mat();
+		_depthConfidenceRaw=cv::Mat();
+#ifdef HAVE_OPENCV_CUDEV
+		_imageRawGpu = cv::cuda::GpuMat();
+		_depthOrRightRawGpu = cv::cuda::GpuMat();
+#endif
 	}
 	if(scan)
 	{
@@ -860,10 +1090,24 @@ void SensorData::clearRawData(bool images, bool scan, bool userData)
 	{
 		_userDataRaw=cv::Mat();
 	}
+	if(occupancyGrid)
+	{
+		_groundCellsRaw=cv::Mat();
+		_emptyCellsRaw=cv::Mat();
+		_obstacleCellsRaw=cv::Mat();
+
+		if( _groundCellsCompressed.empty()  && _groundCellsRaw.empty() &&
+			_obstacleCellsCompressed.empty()  && _obstacleCellsRaw.empty() &&
+			_emptyCellsCompressed.empty()  && _emptyCellsRaw.empty())
+		{
+			_cellSize = 0.0f;
+			_viewPoint = cv::Point3f();
+		}
+	}
 }
 
 
-bool SensorData::isPointVisibleFromCameras(const cv::Point3f & pt) const
+int SensorData::isPointVisibleFromCameras(const cv::Point3f & pt) const
 {
 	if(_cameraModels.size() >= 1)
 	{
@@ -874,13 +1118,12 @@ bool SensorData::isPointVisibleFromCameras(const cv::Point3f & pt) const
 				cv::Point3f ptInCameraFrame = util3d::transformPoint(pt, _cameraModels[i].localTransform().inverse());
 				if(ptInCameraFrame.z > 0.0f)
 				{
-					int borderWidth = int(float(_cameraModels[i].imageWidth())* 0.2);
 					int u, v;
 					_cameraModels[i].reproject(ptInCameraFrame.x, ptInCameraFrame.y, ptInCameraFrame.z, u, v);
-					if(uIsInBounds(u, borderWidth, _cameraModels[i].imageWidth()-2*borderWidth) &&
-					   uIsInBounds(v, borderWidth, _cameraModels[i].imageHeight()-2*borderWidth))
+					if(uIsInBounds(u, 0, _cameraModels[i].imageWidth()) &&
+					   uIsInBounds(v, 0, _cameraModels[i].imageHeight()))
 					{
-						return true;
+						return i;
 					}
 				}
 			}
@@ -900,7 +1143,7 @@ bool SensorData::isPointVisibleFromCameras(const cv::Point3f & pt) const
 					if(uIsInBounds(u, 0, _stereoCameraModels[i].left().imageWidth()) &&
 					   uIsInBounds(v, 0, _stereoCameraModels[i].left().imageHeight()))
 					{
-						return true;
+						return i;
 					}
 				}
 			}
@@ -910,7 +1153,7 @@ bool SensorData::isPointVisibleFromCameras(const cv::Point3f & pt) const
 	{
 		UERROR("no valid camera model!");
 	}
-	return false;
+	return -1;
 }
 
 } // namespace rtabmap

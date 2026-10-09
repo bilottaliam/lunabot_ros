@@ -42,9 +42,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UFile.h>
 #include <rtabmap/utilite/UStl.h>
 #include <rtabmap/utilite/UTimer.h>
-#ifdef RTABMAP_PYTHON
-#include <rtabmap/core/PythonInterface.h>
-#endif
 #include <fstream>
 #include <string>
 #include <QApplication>
@@ -87,6 +84,11 @@ void showUsage()
 			"   --to_depth \"to_depth.png\"        Depth or right image file of the second image.\n"
 			"                                        For 3D->3D estimation, from_depth and to_depth\n"
 			"                                        should be both set.\n"
+			"   --raw                              Provided images are raw and should be rectified.\n"
+			"                                        Doesn't need to be explicitly set if calibration\n"
+			"                                        is not provided. For RGB-D data, only the RGB image\n"
+			"                                        is rectified, the depth is assumed already matching\n"
+			"                                        the rectified one.\n"
 			"\n\n"
 			"%s\n",
 			Parameters::showUsage());
@@ -107,6 +109,7 @@ int main(int argc, char * argv[])
 	std::string toDepthPath;
 	std::string calibrationPath;
 	std::string calibrationToPath;
+	bool imagesRectified = true;
 	for(int i=1; i<argc-2; ++i)
 	{
 		if(strcmp(argv[i], "--from_depth") == 0)
@@ -157,6 +160,10 @@ int main(int argc, char * argv[])
 				showUsage();
 			}
 		}
+		else if(strcmp(argv[i], "--raw") == 0)
+		{
+			imagesRectified = false;
+		}
 		else if(strcmp(argv[i], "--help") == 0)
 		{
 			showUsage();
@@ -171,10 +178,10 @@ int main(int argc, char * argv[])
 	}
 	printf("  --from_depth  = \"%s\"\n", fromDepthPath.c_str());
 	printf("  --to_depth    = \"%s\"\n", toDepthPath.c_str());
-
-#ifdef RTABMAP_PYTHON
-	rtabmap::PythonInterface pythonInterface;
-#endif
+	if(!imagesRectified)
+	{
+		printf("  --raw (images will be rectified)\n");
+	}
 
 	ParametersMap parameters = Parameters::parseArguments(argc, argv);
 	parameters.insert(ParametersPair(Parameters::kRegRepeatOnce(), "false"));
@@ -311,12 +318,57 @@ int main(int argc, char * argv[])
 		if(model.isValidForProjection())
 		{
 			printf("Mono calibration model detected.\n");
+
+			if(!imagesRectified)
+			{
+				if(!model.isValidForRectification())
+				{
+					printf("ERROR: calibration model \"%s\" is not valid for rectification and --raw option was set. Aborting.\n", calibrationPath.c_str());
+					exit(-1);
+				}
+				if(!model.isRectificationMapInitialized()) {
+					model.initRectificationMap();
+				}
+				if(!modelTo.isValidForRectification())
+				{
+					printf("ERROR: calibration model \"%s\" is not valid for rectification and --raw option was set. Aborting.\n", calibrationToPath.c_str());
+					exit(-1);
+				}
+				if(!modelTo.isRectificationMapInitialized()) {
+					modelTo.initRectificationMap();
+				}
+				imageFrom = model.rectifyImage(imageFrom);
+				imageTo = modelTo.rectifyImage(imageTo);
+			}
 			dataFrom = SensorData(imageFrom, fromDepth, model, 1);
 			dataTo = SensorData(imageTo, toDepth, modelTo, 2);
 		}
 		else //stereo
 		{
 			printf("Stereo calibration model detected.\n");
+			if(!imagesRectified)
+			{
+				if(!stereoModel.isValidForRectification())
+				{
+					printf("ERROR: stereo calibration model \"%s\" is not valid for rectification and --raw option was set. Aborting.\n", calibrationPath.c_str());
+					exit(-1);
+				}
+				if(!stereoModel.isRectificationMapInitialized()) {
+					stereoModel.initRectificationMap();
+				}
+				if(!stereoModelTo.isValidForRectification())
+				{
+					printf("ERROR: stereo calibration model \"%s\" is not valid for rectification and --raw option was set. Aborting.\n", calibrationToPath.c_str());
+					exit(-1);
+				}
+				if(!stereoModelTo.isRectificationMapInitialized()) {
+					stereoModelTo.initRectificationMap();
+				}
+				imageFrom = stereoModel.left().rectifyImage(imageFrom);
+				fromDepth = stereoModel.right().rectifyImage(fromDepth);
+				imageTo = stereoModelTo.left().rectifyImage(imageTo);
+				toDepth = stereoModelTo.right().rectifyImage(toDepth);
+			}
 			dataFrom = SensorData(imageFrom, fromDepth, stereoModel, 1);
 			dataTo = SensorData(imageTo, toDepth, stereoModelTo, 2);
 		}
@@ -329,7 +381,7 @@ int main(int argc, char * argv[])
 		{
 			parameters.insert(ParametersPair(Parameters::kVisEstimationType(), "2")); // Set 2D->2D estimation for mono images
 			parameters.insert(ParametersPair(Parameters::kVisEpipolarGeometryVar(), "1")); //Unknown scale
-			printf("Calibration not set, setting %s=1 and %s=2 by default (2D->2D estimation)\n", Parameters::kVisEpipolarGeometryVar().c_str(), Parameters::kVisEstimationType().c_str());
+			printf("Depth/Stereo not set, setting %s=1 and %s=2 by default (2D->2D estimation)\n", Parameters::kVisEpipolarGeometryVar().c_str(), Parameters::kVisEstimationType().c_str());
 		}
 		RegistrationVis reg(parameters);
 		RegistrationInfo info;
@@ -362,6 +414,24 @@ int main(int argc, char * argv[])
 		std::string pyMatcherPath;
 		Parameters::parse(parameters, Parameters::kVisPnPReprojError(), reprojError);
 		Parameters::parse(parameters, Parameters::kPyMatcherPath(), pyMatcherPath);
+
+		// PyMatcher cannot match binary features, RegistrationVis falls back to
+		// brute force with cross check (see the warning above).
+		const bool pyMatcherOnBinaryFeatures =
+				reg.getNNType()==6 &&
+				!dataFrom.getWordsDescriptors().empty() &&
+				dataFrom.getWordsDescriptors().type()!=CV_32F;
+		QString nnTypeName = (pyMatcherOnBinaryFeatures?
+				RegistrationVis::getNNTypeName(5):reg.getNNTypeName()).c_str();
+		// 5, 6 and 7 are the approaches RegistrationVis matches with itself,
+		// the others search for the k nearest neighbors and do the ratio test.
+		const bool nndrUsed = reg.getNNType()<5 || reg.getNNType()>7;
+		if(reg.getNNType()==6 && !pyMatcherOnBinaryFeatures)
+		{
+			// the script actually used is more telling than the generic name
+			nnTypeName = QString(uSplit(UFile::getName(pyMatcherPath), '.').front().c_str()).replace("rtabmap_", "");
+		}
+
 		dialog.setWindowTitle(QString("Matches (%1/%2) %3 sec [%4=%5 (%6) %7=%8 (%9)%10 %11=%12 (%13) %14=%15]")
 				.arg(info.inliers)
 				.arg(info.matches)
@@ -371,11 +441,8 @@ int main(int argc, char * argv[])
 				.arg(reg.getDetector()?Feature2D::typeName(reg.getDetector()->getType()).c_str():"?")
 				.arg(Parameters::kVisCorNNType().c_str())
 				.arg(reg.getNNType())
-				.arg(reg.getNNType()<VWDictionary::kNNUndef?VWDictionary::nnStrategyName((VWDictionary::NNStrategy)reg.getNNType()).c_str():
-						reg.getNNType()==5||(reg.getNNType()==6&&!dataFrom.getWordsDescriptors().empty()&& dataFrom.getWordsDescriptors().type()!=CV_32F)?"BFCrossCheck":
-						reg.getNNType()==6?QString(uSplit(UFile::getName(pyMatcherPath), '.').front().c_str()).replace("rtabmap_", ""):
-						reg.getNNType()==7?"GMS":"?")
-				.arg(reg.getNNType()<5?QString(" %1=%2").arg(Parameters::kVisCorNNDR().c_str()).arg(reg.getNNDR()):"")
+				.arg(nnTypeName)
+				.arg(nndrUsed?QString(" %1=%2").arg(Parameters::kVisCorNNDR().c_str()).arg(reg.getNNDR()):"")
 				.arg(Parameters::kVisEstimationType().c_str())
 				.arg(reg.getEstimationType())
 				.arg(reg.getEstimationType()==0?"3D->3D":reg.getEstimationType()==1?"3D->2D":reg.getEstimationType()==2?"2D->2D":"?")
@@ -400,10 +467,12 @@ int main(int argc, char * argv[])
 				std::map<int, int> wordsTo = uMultimapToMapUnique(dataTo.getWords());
 				std::map<int, cv::KeyPoint> kptsFrom;
 				std::map<int, cv::KeyPoint> kptsTo;
+				UASSERT(dataFrom.getWords().size() == dataFrom.getWordsKpts().size());
 				for(std::map<int, int>::iterator iter=wordsFrom.begin(); iter!=wordsFrom.end(); ++iter)
 				{
 					kptsFrom.insert(std::make_pair(iter->first, dataFrom.getWordsKpts()[iter->second]));
 				}
+				UASSERT(dataTo.getWords().size() == dataTo.getWordsKpts().size());
 				for(std::map<int, int>::iterator iter=wordsTo.begin(); iter!=wordsTo.end(); ++iter)
 				{
 					kptsTo.insert(std::make_pair(iter->first, dataTo.getWordsKpts()[iter->second]));

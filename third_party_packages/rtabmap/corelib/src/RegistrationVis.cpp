@@ -38,12 +38,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/VisualWord.h>
 #include <rtabmap/core/Optimizer.h>
 #include <rtabmap/core/util3d_transforms.h>
+#include <rtabmap/core/FlannIndex.h>
 #include <rtabmap/utilite/ULogger.h>
 #include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/utilite/UStl.h>
 #include <rtabmap/utilite/UTimer.h>
 #include <rtabmap/utilite/UMath.h>
-#include <opencv2/core/core_c.h>
+#if CV_MAJOR_VERSION > 4
+#include <opencv2/geometry.hpp>
+#endif
 
 #if defined(HAVE_OPENCV_XFEATURES2D) && (CV_MAJOR_VERSION > 3 || (CV_MAJOR_VERSION==3 && CV_MINOR_VERSION >=4 && CV_SUBMINOR_VERSION >= 1))
 #include <opencv2/xfeatures2d.hpp> // For GMS matcher
@@ -54,7 +57,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opencv2/cudaimgproc.hpp>
 #endif
 
-#include <rtflann/flann.hpp>
 
 
 #ifdef RTABMAP_PYTHON
@@ -62,6 +64,52 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 namespace rtabmap {
+
+// The dictionary strategy a Vis/CorNNType value stands for. Vis/CorNNType
+// shares the values of Kp/NNStrategy for the strategies the dictionary
+// implements, and extends them with matching approaches of its own, hence the
+// mapping. Return VWDictionary::kNNUndef for the values RegistrationVis handles
+// itself (BruteForceCrossCheck, SuperGlue, GMS).
+static VWDictionary::NNStrategy nnStrategyFromCorNNType(int nnType)
+{
+	// 0 to 4 are the dictionary strategies themselves, 5, 6 and 7 are the
+	// approaches RegistrationVis implements (BruteForceCrossCheck, SuperGlue
+	// and GMS), and the ones after them are dictionary strategies again, at an
+	// offset of the three above.
+	if(nnType >= 0 && nnType <= VWDictionary::kNNBruteForceGPU)
+	{
+		return (VWDictionary::NNStrategy)nnType;
+	}
+	if(nnType > 7)
+	{
+		const int strategy = nnType - 3;
+		if(strategy < VWDictionary::kNNUndef)
+		{
+			return (VWDictionary::NNStrategy)strategy;
+		}
+	}
+	return VWDictionary::kNNUndef;
+}
+
+std::string RegistrationVis::getNNTypeName(int nnType)
+{
+	const VWDictionary::NNStrategy strategy = nnStrategyFromCorNNType(nnType);
+	if(strategy != VWDictionary::kNNUndef)
+	{
+		return VWDictionary::nnStrategyName(strategy);
+	}
+	switch(nnType)
+	{
+	case 5:
+		return "BRUTE FORCE CROSS CHECK";
+	case 6:
+		return "PY MATCHER";
+	case 7:
+		return "GMS";
+	default:
+		return "Unknown";
+	}
+}
 
 RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration * child) :
 		Registration(parameters, child),
@@ -71,7 +119,6 @@ RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration 
 		_refineIterations(Parameters::defaultVisRefineIterations()),
 		_epipolarGeometryVar(Parameters::defaultVisEpipolarGeometryVar()),
 		_estimationType(Parameters::defaultVisEstimationType()),
-		_forwardEstimateOnly(Parameters::defaultVisForwardEstOnly()),
 		_PnPReprojError(Parameters::defaultVisPnPReprojError()),
 		_PnPFlags(Parameters::defaultVisPnPFlags()),
 		_PnPRefineIterations(Parameters::defaultVisPnPRefineIterations()),
@@ -85,6 +132,9 @@ RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration 
 		_flowEps(Parameters::defaultVisCorFlowEps()),
 		_flowMaxLevel(Parameters::defaultVisCorFlowMaxLevel()),
 		_flowGpu(Parameters::defaultVisCorFlowGpu()),
+		_flowUseMinEigenVals(Parameters::defaultVisCorFlowUseMinEigenVals()),
+		_flowMinEigThreshold(Parameters::defaultVisCorFlowMinEigThreshold()),
+		_flowErrorThreshold(Parameters::defaultVisCorFlowErrorThreshold()),
 		_nndr(Parameters::defaultVisCorNNDR()),
 		_nnType(Parameters::defaultVisCorNNType()),
 		_gmsWithRotation(Parameters::defaultGMSWithRotation()),
@@ -94,6 +144,7 @@ RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration 
 		_guessMatchToProjection(Parameters::defaultVisCorGuessMatchToProjection()),
 		_bundleAdjustment(Parameters::defaultVisBundleAdjustment()),
 		_depthAsMask(Parameters::defaultVisDepthAsMask()),
+		_maskFloorThreshold(Parameters::defaultVisDepthMaskFloorThr()),
 		_minInliersDistributionThr(Parameters::defaultVisMinInliersDistribution()),
 		_maxInliersMeanDistance(Parameters::defaultVisMeanInliersDistance()),
 		_detectorFrom(0),
@@ -118,6 +169,12 @@ RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration 
 	uInsert(_featureParameters, ParametersPair(Parameters::kKpGridRows(), _featureParameters.at(Parameters::kVisGridRows())));
 	uInsert(_featureParameters, ParametersPair(Parameters::kKpGridCols(), _featureParameters.at(Parameters::kVisGridCols())));
 	uInsert(_featureParameters, ParametersPair(Parameters::kKpNewWordsComparedTogether(), "false"));
+	// The dictionary used to match descriptors (see computeTransformationImpl())
+	// is built once and searched once, then thrown away: the words added while
+	// searching it are never indexed. Nothing is gained by keeping its index
+	// ready to be added to, and the bookkeeping that needs costs a descriptor
+	// reference per feature on every registration.
+	uInsert(_featureParameters, ParametersPair(Parameters::kKpIncrementalFlann(), "false"));
 
 	this->parseParameters(parameters);
 }
@@ -131,7 +188,6 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kVisIterations(), _iterations);
 	Parameters::parse(parameters, Parameters::kVisRefineIterations(), _refineIterations);
 	Parameters::parse(parameters, Parameters::kVisEstimationType(), _estimationType);
-	Parameters::parse(parameters, Parameters::kVisForwardEstOnly(), _forwardEstimateOnly);
 	Parameters::parse(parameters, Parameters::kVisEpipolarGeometryVar(), _epipolarGeometryVar);
 	Parameters::parse(parameters, Parameters::kVisPnPReprojError(), _PnPReprojError);
 	Parameters::parse(parameters, Parameters::kVisPnPFlags(), _PnPFlags);
@@ -146,6 +202,9 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kVisCorFlowEps(), _flowEps);
 	Parameters::parse(parameters, Parameters::kVisCorFlowMaxLevel(), _flowMaxLevel);
 	Parameters::parse(parameters, Parameters::kVisCorFlowGpu(), _flowGpu);
+	Parameters::parse(parameters, Parameters::kVisCorFlowUseMinEigenVals(), _flowUseMinEigenVals);
+	Parameters::parse(parameters, Parameters::kVisCorFlowMinEigThreshold(), _flowMinEigThreshold);
+	Parameters::parse(parameters, Parameters::kVisCorFlowErrorThreshold(), _flowErrorThreshold);
 	Parameters::parse(parameters, Parameters::kVisCorNNDR(), _nndr);
 	Parameters::parse(parameters, Parameters::kVisCorNNType(), _nnType);
 	Parameters::parse(parameters, Parameters::kGMSWithRotation(), _gmsWithRotation);
@@ -155,6 +214,7 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kVisCorGuessMatchToProjection(), _guessMatchToProjection);
 	Parameters::parse(parameters, Parameters::kVisBundleAdjustment(), _bundleAdjustment);
 	Parameters::parse(parameters, Parameters::kVisDepthAsMask(), _depthAsMask);
+	Parameters::parse(parameters, Parameters::kVisDepthMaskFloorThr(), _maskFloorThreshold);
 	Parameters::parse(parameters, Parameters::kVisMinInliersDistribution(), _minInliersDistributionThr);
 	Parameters::parse(parameters, Parameters::kVisMeanInliersDistance(), _maxInliersMeanDistance);
 	uInsert(_bundleParameters, parameters);
@@ -229,9 +289,10 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 
 	if(uContains(parameters, Parameters::kVisCorNNType()))
 	{
-		if(_nnType<VWDictionary::kNNUndef)
+		const VWDictionary::NNStrategy strategy = nnStrategyFromCorNNType(_nnType);
+		if(strategy != VWDictionary::kNNUndef)
 		{
-			uInsert(_featureParameters, ParametersPair(Parameters::kKpNNStrategy(), uNumber2Str(_nnType)));
+			uInsert(_featureParameters, ParametersPair(Parameters::kKpNNStrategy(), uNumber2Str((int)strategy)));
 		}
 	}
 	if(uContains(parameters, Parameters::kVisCorNNDR()))
@@ -286,6 +347,10 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 	{
 		uInsert(_featureParameters, ParametersPair(Parameters::kKpGridCols(), parameters.at(Parameters::kVisGridCols())));
 	}
+	if(uContains(parameters, Parameters::kRtabmapWorkingDirectory()))
+	{
+		uInsert(_featureParameters, ParametersPair(Parameters::kRtabmapWorkingDirectory(), parameters.at(Parameters::kRtabmapWorkingDirectory())));
+	}
 
 	delete _detectorFrom;
 	delete _detectorTo;
@@ -312,12 +377,12 @@ Transform RegistrationVis::computeTransformationImpl(
 	UDEBUG("%s=%f", Parameters::kVisInlierDistance().c_str(), _inlierDistance);
 	UDEBUG("%s=%d", Parameters::kVisIterations().c_str(), _iterations);
 	UDEBUG("%s=%d", Parameters::kVisEstimationType().c_str(), _estimationType);
-	UDEBUG("%s=%d", Parameters::kVisForwardEstOnly().c_str(), _forwardEstimateOnly);
 	UDEBUG("%s=%f", Parameters::kVisEpipolarGeometryVar().c_str(), _epipolarGeometryVar);
 	UDEBUG("%s=%f", Parameters::kVisPnPReprojError().c_str(), _PnPReprojError);
 	UDEBUG("%s=%d", Parameters::kVisPnPFlags().c_str(), _PnPFlags);
 	UDEBUG("%s=%f", Parameters::kVisPnPMaxVariance().c_str(), _PnPMaxVar);
-	UDEBUG("%s=%f", Parameters::kVisPnPSplitLinearCovComponents().c_str(), _PnPSplitLinearCovarianceComponents);
+	UDEBUG("%s=%f", Parameters::kVisPnPSplitLinearCovComponents().c_str(), (double)_PnPSplitLinearCovarianceComponents);
+	UDEBUG("%s=%f", Parameters::kVisPnPVarianceMedianRatio().c_str(), (double)_PnPVarMedianRatio);
 	UDEBUG("%s=%d", Parameters::kVisCorType().c_str(), _correspondencesApproach);
 	UDEBUG("%s=%d", Parameters::kVisCorFlowWinSize().c_str(), _flowWinSize);
 	UDEBUG("%s=%d", Parameters::kVisCorFlowIterations().c_str(), _flowIterations);
@@ -330,11 +395,12 @@ Transform RegistrationVis::computeTransformationImpl(
 	UDEBUG("Feature Detector = %d", (int)_detectorFrom->getType());
 	UDEBUG("guess=%s", guess.prettyPrint().c_str());
 
-	UDEBUG("Input(%d): from=%d words, %d 3D words, %d words descriptors,  %d kpts, %d kpts3D, %d descriptors, image=%dx%d models=%d stereo=%d",
+	UDEBUG("Input(%d): from=%d words, %d 3D words, %d words descriptors, %d words kpts, %d kpts, %d kpts3D, %d descriptors, image=%dx%d models=%d stereo=%d",
 			fromSignature.id(),
 			(int)fromSignature.getWords().size(),
 			(int)fromSignature.getWords3().size(),
 			(int)fromSignature.getWordsDescriptors().rows,
+			(int)fromSignature.getWordsKpts().size(),
 			(int)fromSignature.sensorData().keypoints().size(),
 			(int)fromSignature.sensorData().keypoints3D().size(),
 			fromSignature.sensorData().descriptors().rows,
@@ -343,11 +409,12 @@ Transform RegistrationVis::computeTransformationImpl(
 			(int)fromSignature.sensorData().cameraModels().size(),
 			(int)fromSignature.sensorData().stereoCameraModels().size());
 
-	UDEBUG("Input(%d): to=%d words, %d 3D words, %d words descriptors, %d kpts, %d kpts3D, %d descriptors, image=%dx%d models=%d stereo=%d",
+	UDEBUG("Input(%d): to=%d words, %d 3D words, %d words descriptors, %d words kpts, %d kpts, %d kpts3D, %d descriptors, image=%dx%d models=%d stereo=%d",
 			toSignature.id(),
 			(int)toSignature.getWords().size(),
 			(int)toSignature.getWords3().size(),
 			(int)toSignature.getWordsDescriptors().rows,
+			(int)toSignature.getWordsKpts().size(),
 			(int)toSignature.sensorData().keypoints().size(),
 			(int)toSignature.sensorData().keypoints3D().size(),
 			toSignature.sensorData().descriptors().rows,
@@ -370,12 +437,15 @@ Transform RegistrationVis::computeTransformationImpl(
 	   (_estimationType==1 || toSignature.getWords3().size())) // required only for 3D->3D and 2D->2D
 	{
 		// no need to extract new features, we have all the data we need
-		UDEBUG("Bypassing feature matching as descriptors and images are empty. We assume features are already matched.");
+		UDEBUG("Bypassing feature matching as descriptors are empty. We assume features are already matched.");
 	}
 	else
 	{
 		UDEBUG("");
 		// just some checks to make sure that input data are ok
+		UASSERT(fromSignature.getWords().empty() ||
+				fromSignature.getWordsKpts().empty() ||
+				(fromSignature.getWords().size() == fromSignature.getWordsKpts().size()));
 		UASSERT(fromSignature.getWords().empty() ||
 				fromSignature.getWords3().empty() ||
 				(fromSignature.getWords().size() == fromSignature.getWords3().size()));
@@ -383,8 +453,11 @@ Transform RegistrationVis::computeTransformationImpl(
 				(int)fromSignature.getWords().size() == fromSignature.getWordsDescriptors().rows ||
 				fromSignature.sensorData().descriptors().empty() ||
 				fromSignature.getWordsDescriptors().empty() == 0);
-		UASSERT((toSignature.getWords().empty() && toSignature.getWords3().empty())||
-				(toSignature.getWords().size() && toSignature.getWords3().empty())||
+		UASSERT(toSignature.getWords().empty() ||
+				toSignature.getWordsKpts().empty() ||
+				(toSignature.getWords().size() == toSignature.getWordsKpts().size()));
+		UASSERT(toSignature.getWords().empty() ||
+				toSignature.getWords3().empty() ||
 				(toSignature.getWords().size() == toSignature.getWords3().size()));
 		UASSERT((int)toSignature.sensorData().keypoints().size() == toSignature.sensorData().descriptors().rows ||
 				(int)toSignature.getWords().size() == toSignature.getWordsDescriptors().rows ||
@@ -423,13 +496,23 @@ Transform RegistrationVis::computeTransformationImpl(
 						   imageFrom.cols % fromSignature.sensorData().depthRaw().cols == 0 &&
 						   imageFrom.rows/fromSignature.sensorData().depthRaw().rows == fromSignature.sensorData().imageRaw().cols/fromSignature.sensorData().depthRaw().cols)
 						{
-							depthMask = util2d::interpolate(fromSignature.sensorData().depthRaw(), fromSignature.sensorData().imageRaw().rows/fromSignature.sensorData().depthRaw().rows, 0.1f);
+							depthMask = fromSignature.sensorData().depthRaw();
+
+							if(_maskFloorThreshold != 0.0f)
+							{
+								UASSERT(!fromSignature.sensorData().cameraModels().empty());
+								UDEBUG("Masking floor (threshold=%f)", _maskFloorThreshold);
+								depthMask = util3d::filterFloor(depthMask, fromSignature.sensorData().cameraModels(), _maskFloorThreshold);
+								UDEBUG("Masking floor done.");
+							}
+
+							depthMask = util2d::interpolate(depthMask, imageFrom.rows/depthMask.rows, 0.1f);
 						}
 						else
 						{
 							UWARN("%s is true, but RGB size (%dx%d) modulo depth size (%dx%d) is not 0. Ignoring depth mask for feature detection.",
 									Parameters::kVisDepthAsMask().c_str(),
-									fromSignature.sensorData().imageRaw().rows, fromSignature.sensorData().imageRaw().cols,
+									imageFrom.rows, imageFrom.cols,
 									fromSignature.sensorData().depthRaw().rows, fromSignature.sensorData().depthRaw().cols);
 						}
 					}
@@ -625,6 +708,7 @@ Transform RegistrationVis::computeTransformationImpl(
 				// Find features in the new left image
 				UDEBUG("guessSet = %d", guessSet?1:0);
 				std::vector<unsigned char> status;
+				std::vector<float> err;
 #ifdef HAVE_OPENCV_CUDAOPTFLOW
 				if (_flowGpu)
 				{
@@ -654,7 +738,6 @@ Transform RegistrationVis::computeTransformationImpl(
 				else
 #endif
 				{
-					std::vector<float> err;
 					UDEBUG("cv::calcOpticalFlowPyrLK() begin");
 					cv::calcOpticalFlowPyrLK(
 						imageFrom,
@@ -666,7 +749,8 @@ Transform RegistrationVis::computeTransformationImpl(
 						cv::Size(_flowWinSize, _flowWinSize),
 						guessSet ? 0 : _flowMaxLevel,
 						cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, _flowIterations, _flowEps),
-						cv::OPTFLOW_LK_GET_MIN_EIGENVALS | (guessSet ? cv::OPTFLOW_USE_INITIAL_FLOW : 0), 1e-4);
+						(_flowUseMinEigenVals ? cv::OPTFLOW_LK_GET_MIN_EIGENVALS : 0) | (guessSet ? cv::OPTFLOW_USE_INITIAL_FLOW : 0),
+						_flowMinEigThreshold);
 					UDEBUG("cv::calcOpticalFlowPyrLK() end");
 				}
 
@@ -675,11 +759,14 @@ Transform RegistrationVis::computeTransformationImpl(
 				std::vector<cv::Point3f> kptsFrom3DKept(kptsFrom3D.size());
 				std::vector<int> orignalWordsFromIdsCpy = orignalWordsFromIds;
 				int ki = 0;
+				UASSERT((status.empty() || cornersTo.size() == status.size()) &&
+						(err.empty() || cornersTo.size() == err.size()));
 				for(unsigned int i=0; i<status.size(); ++i)
 				{
 					if(status[i] &&
 					   uIsInBounds(cornersTo[i].x, 0.0f, float(imageTo.cols)) &&
-					   uIsInBounds(cornersTo[i].y, 0.0f, float(imageTo.rows)))
+					   uIsInBounds(cornersTo[i].y, 0.0f, float(imageTo.rows)) &&
+					   (_flowUseMinEigenVals || err.empty() || err[i] < _flowErrorThreshold))
 					{
 						if(orignalWordsFromIdsCpy.size())
 						{
@@ -700,7 +787,7 @@ Transform RegistrationVis::computeTransformationImpl(
 				kptsFrom3D = kptsFrom3DKept;
 
 				std::vector<cv::Point3f> kptsTo3D;
-				if(_estimationType == 0 || _estimationType == 1 || !_forwardEstimateOnly)
+				if(_estimationType == 0 || _estimationType == 1)
 				{
 					kptsTo3D = _detectorTo->generateKeypoints3D(toSignature.sensorData(), kptsTo);
 				}
@@ -770,13 +857,23 @@ Transform RegistrationVis::computeTransformationImpl(
 						   imageTo.cols % toSignature.sensorData().depthRaw().cols == 0 &&
 						   imageTo.rows/toSignature.sensorData().depthRaw().rows == imageTo.cols/toSignature.sensorData().depthRaw().cols)
 						{
-							depthMask = util2d::interpolate(toSignature.sensorData().depthRaw(), imageTo.rows/toSignature.sensorData().depthRaw().rows, 0.1f);
+							depthMask = toSignature.sensorData().depthRaw();
+
+							if(_maskFloorThreshold != 0.0f)
+							{
+								UASSERT(!toSignature.sensorData().cameraModels().empty());
+								UDEBUG("Masking floor (threshold=%f)", _maskFloorThreshold);
+								depthMask = util3d::filterFloor(depthMask, toSignature.sensorData().cameraModels(), _maskFloorThreshold);
+								UDEBUG("Masking floor done.");
+							}
+
+							depthMask = util2d::interpolate(depthMask, imageTo.rows/depthMask.rows, 0.1f);
 						}
 						else
 						{
 							UWARN("%s is true, but RGB size (%dx%d) modulo depth size (%dx%d) is not 0. Ignoring depth mask for feature detection.",
 									Parameters::kVisDepthAsMask().c_str(),
-									toSignature.sensorData().imageRaw().rows, toSignature.sensorData().imageRaw().cols,
+									imageTo.rows, imageTo.cols,
 									toSignature.sensorData().depthRaw().rows, toSignature.sensorData().depthRaw().cols);
 						}
 					}
@@ -871,15 +968,15 @@ Transform RegistrationVis::computeTransformationImpl(
 				{
 					UWARN("kptsFrom (%d) is not the same size as fromSignature.getWords3() (%d), there "
 						   "is maybe a problem with the logic above (getWords3() should be null or equal to kptsfrom). Regenerating kptsFrom3D...",
-						   kptsFrom.size(),
-						   fromSignature.getWords3().size());
+						   (int)kptsFrom.size(),
+						   (int)fromSignature.getWords3().size());
 				}
 				else if(fromSignature.sensorData().keypoints3D().size() && kptsFrom.size() != fromSignature.sensorData().keypoints3D().size())
 				{
 					UWARN("kptsFrom (%d) is not the same size as fromSignature.sensorData().keypoints3D() (%d), there "
 						   "is maybe a problem with the logic above (keypoints3D should be null or equal to kptsfrom). Regenerating kptsFrom3D...",
-						   kptsFrom.size(),
-						   fromSignature.sensorData().keypoints3D().size());
+						   (int)kptsFrom.size(),
+						   (int)fromSignature.sensorData().keypoints3D().size());
 				}
 				kptsFrom3D = _detectorFrom->generateKeypoints3D(fromSignature.sensorData(), kptsFrom);
 				UDEBUG("generated kptsFrom3D=%d", (int)kptsFrom3D.size());
@@ -1038,24 +1135,27 @@ Transform RegistrationVis::computeTransformationImpl(
 						if(_guessMatchToProjection)
 						{
 							UDEBUG("match frame to projected");
-							// Create kd-tree for projected keypoints
-							rtflann::Matrix<float> cornersProjectedMat((float*)cornersProjected.data(), cornersProjected.size(), 2);
-							rtflann::Index<rtflann::L2_Simple<float> > index(cornersProjectedMat, rtflann::KDTreeIndexParams());
-							index.buildIndex();
+							// Index the projected keypoints. A rebalancing factor of 1:
+							// the index is thrown away with the frame, nothing is ever
+							// added to or removed from it. cv::Point2f being two floats,
+							// the points are indexed where they are.
+							cv::Mat cornersProjectedMat((int)cornersProjected.size(), 2, CV_32FC1, (void*)cornersProjected.data());
+							FlannIndex flannIndex;
+							flannIndex.buildIndex(FlannIndex::NANOFLANN_INDEX_KDTREE_SINGLE, cornersProjectedMat, false, 1.0f);
 
 							std::vector< std::vector<size_t> > indices;
 							std::vector<std::vector<float> > dists;
 							float radius = (float)_guessWinSize; // pixels
 							std::vector<cv::Point2f> pointsTo;
 							cv::KeyPoint::convert(kptsTo, pointsTo);
-							rtflann::Matrix<float> pointsToMat((float*)pointsTo.data(), pointsTo.size(), 2);
-							index.radiusSearch(pointsToMat, indices, dists, radius*radius, rtflann::SearchParams());
+							cv::Mat pointsToMat((int)pointsTo.size(), 2, CV_32FC1, (void*)pointsTo.data());
+							flannIndex.radiusSearch(pointsToMat, indices, dists, radius);
 
-							UASSERT(indices.size() == pointsToMat.rows);
+							UASSERT(indices.size() == (size_t)pointsToMat.rows);
 							UASSERT(descriptorsFrom.cols == descriptorsTo.cols);
 							UASSERT(descriptorsFrom.rows == (int)kptsFrom.size());
 							UASSERT((int)pointsToMat.rows == descriptorsTo.rows);
-							UASSERT(pointsToMat.rows == kptsTo.size());
+							UASSERT(pointsToMat.rows == (int)kptsTo.size());
 							UDEBUG("radius search done for guess");
 
 							// Process results (Nearest Neighbor Distance Ratio)
@@ -1063,9 +1163,21 @@ Transform RegistrationVis::computeTransformationImpl(
 							std::map<int,int> addedWordsFrom; //<id, index>
 							std::map<int, int> duplicates; //<fromId, toId>
 							int newWords = 0;
+							// The projected words that a keypoint of the frame was found
+							// near, as the other branch collects them: several keypoints
+							// can be near the same one, hence the set. OdometryF2M uses
+							// them to know which words of its map are still seen.
+							std::set<int> projectedIDs;
 							cv::Mat descriptors(10, descriptorsTo.cols, descriptorsTo.type());
-							for(unsigned int i = 0; i < pointsToMat.rows; ++i)
+							for(int i = 0; i < pointsToMat.rows; ++i)
 							{
+								for(unsigned int j=0; j<indices[i].size(); ++j)
+								{
+									const int projectedIndexFrom = projectedIndexToDescIndex[indices[i].at(j)];
+									projectedIDs.insert(!orignalWordsFromIds.empty()?
+											orignalWordsFromIds[projectedIndexFrom]:projectedIndexFrom);
+								}
+
 								int matchedIndex = -1;
 								if(indices[i].size() >= 2)
 								{
@@ -1156,9 +1268,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									++newWords;
 								}
 							}
-							UDEBUG("addedWordsFrom=%d/%d (duplicates=%d, newWords=%d), kptsTo=%d, wordsTo=%d, words3From=%d",
+							info.projectedIDs = std::vector<int>(projectedIDs.begin(), projectedIDs.end());
+							UDEBUG("addedWordsFrom=%d/%d (duplicates=%d, newWords=%d), kptsTo=%d, wordsTo=%d, words3From=%d, projectedIDs=%d",
 								(int)addedWordsFrom.size(), (int)cornersProjected.size(), (int)duplicates.size(), newWords,
-								(int)kptsTo.size(), (int)wordsTo.size(), (int)words3From.size());
+								(int)kptsTo.size(), (int)wordsTo.size(), (int)words3From.size(), (int)info.projectedIDs.size());
 
 							// create fake ids for not matched words from "from"
 							int addWordsFromNotMatched = 0;
@@ -1180,25 +1293,29 @@ Transform RegistrationVis::computeTransformationImpl(
 						else
 						{
 							UDEBUG("match projected to frame");
+							// Index the frame's keypoints. A rebalancing factor of 1:
+							// the index is thrown away with the frame, nothing is ever
+							// added to or removed from it. cv::Point2f being two floats,
+							// the points are indexed where they are.
 							std::vector<cv::Point2f> pointsTo;
 							cv::KeyPoint::convert(kptsTo, pointsTo);
-							rtflann::Matrix<float> pointsToMat((float*)pointsTo.data(), pointsTo.size(), 2);
-							rtflann::Index<rtflann::L2_Simple<float> > index(pointsToMat, rtflann::KDTreeIndexParams());
-							index.buildIndex();
+							cv::Mat pointsToMat((int)pointsTo.size(), 2, CV_32FC1, (void*)pointsTo.data());
+							FlannIndex flannIndex;
+							flannIndex.buildIndex(FlannIndex::NANOFLANN_INDEX_KDTREE_SINGLE, pointsToMat, false, 1.0f);
 
-							std::vector< std::vector<size_t> > indices;
-							std::vector<std::vector<float> > dists;
+							cv::Mat queryMat((int)cornersProjected.size(), 2, CV_32FC1, (void*)cornersProjected.data());
+
+							std::vector<std::vector<size_t>> indices;
+							std::vector<std::vector<float>> dists;
 							float radius = (float)_guessWinSize; // pixels
-							rtflann::Matrix<float> cornersProjectedMat((float*)cornersProjected.data(), cornersProjected.size(), 2);
-							index.radiusSearch(cornersProjectedMat, indices, dists, radius*radius, rtflann::SearchParams(32, 0, false));
 
-							UASSERT(indices.size() == cornersProjectedMat.rows);
-							UASSERT(descriptorsFrom.cols == descriptorsTo.cols);
-							UASSERT(descriptorsFrom.rows == (int)kptsFrom.size());
+							flannIndex.radiusSearch(queryMat, indices, dists, radius, 0, 32, 0.0, false);
+
+							UASSERT(indices.size() == cornersProjected.size());
 							UASSERT((int)pointsToMat.rows == descriptorsTo.rows);
-							UASSERT(pointsToMat.rows == kptsTo.size());
+							UASSERT(pointsToMat.rows == (int)kptsTo.size());
 							UDEBUG("radius search done for guess");
-
+							
 							// Process results (Nearest Neighbor Distance Ratio)
 							std::set<int> addedWordsTo;
 							std::set<int> addedWordsFrom;
@@ -1206,7 +1323,7 @@ Transform RegistrationVis::computeTransformationImpl(
 							double bruteForceDescCopy = 0.0;
 							UTimer bruteForceTimer;
 							cv::Mat descriptors(10, descriptorsTo.cols, descriptorsTo.type());
-							for(unsigned int i = 0; i < cornersProjectedMat.rows; ++i)
+							for(unsigned int i = 0; i < cornersProjected.size(); ++i)
 							{
 								int matchedIndexFrom = projectedIndexToDescIndex[i];
 
@@ -1536,388 +1653,335 @@ Transform RegistrationVis::computeTransformationImpl(
 	info.matchesIDs.clear();
 	if(toSignature.getWords().size())
 	{
-		Transform transforms[2];
-		std::vector<int> inliers[2];
-		std::vector<int> matches[2];
-		cv::Mat covariances[2];
-		covariances[0] = cv::Mat::eye(6,6,CV_64FC1);
-		covariances[1] = cv::Mat::eye(6,6,CV_64FC1);
-		for(int dir=0; dir<(!_forwardEstimateOnly?2:1); ++dir)
+		std::vector<int> inliers;
+		std::vector<int> matches;
+
+		if(_estimationType == 2) // Epipolar Geometry
 		{
-			// A to B
-			Signature * signatureA;
-			Signature * signatureB;
-			if(dir == 0)
+			UDEBUG("");
+			if((toSignature.sensorData().stereoCameraModels().size() != 1 ||
+				!toSignature.sensorData().stereoCameraModels()[0].isValidForProjection()) &&
+				(toSignature.sensorData().cameraModels().size() != 1 ||
+				!toSignature.sensorData().cameraModels()[0].isValidForProjection()))
 			{
-				signatureA = &fromSignature;
-				signatureB = &toSignature;
+				UERROR("Calibrated camera required (multi-cameras not supported).");
 			}
-			else
+			else if((int)fromSignature.getWords().size() >= _minInliers &&
+					(int)toSignature.getWords().size() >= _minInliers)
 			{
-				signatureA = &toSignature;
-				signatureB = &fromSignature;
-			}
-			if(_estimationType == 2) // Epipolar Geometry
-			{
-				UDEBUG("");
-				if((signatureB->sensorData().stereoCameraModels().size() != 1 ||
-					!signatureB->sensorData().stereoCameraModels()[0].isValidForProjection()) &&
-				   (signatureB->sensorData().cameraModels().size() != 1 ||
-					!signatureB->sensorData().cameraModels()[0].isValidForProjection()))
+				UASSERT((fromSignature.sensorData().stereoCameraModels().size() == 1 && fromSignature.sensorData().stereoCameraModels()[0].isValidForProjection()) || (fromSignature.sensorData().cameraModels().size() == 1 && fromSignature.sensorData().cameraModels()[0].isValidForProjection()));
+				const CameraModel & cameraModel = fromSignature.sensorData().stereoCameraModels().size()?fromSignature.sensorData().stereoCameraModels()[0].left():fromSignature.sensorData().cameraModels()[0];
+
+				// we only need the camera transform, send guess words3 for scale estimation
+				Transform cameraTransform;
+				double variance = 1.0f;
+				std::vector<int> matchesV;
+				std::map<int, int> uniqueWordsA = uMultimapToMapUnique(fromSignature.getWords());
+				std::map<int, int> uniqueWordsB = uMultimapToMapUnique(toSignature.getWords());
+				std::map<int, cv::KeyPoint> wordsA;
+				std::map<int, cv::Point3f> words3A;
+				std::map<int, cv::KeyPoint> wordsB;
+				for(std::map<int, int>::iterator iter=uniqueWordsA.begin(); iter!=uniqueWordsA.end(); ++iter)
 				{
-					UERROR("Calibrated camera required (multi-cameras not supported).");
+					wordsA.insert(std::make_pair(iter->first, fromSignature.getWordsKpts()[iter->second]));
+					if(!fromSignature.getWords3().empty())
+					{
+						words3A.insert(std::make_pair(iter->first, fromSignature.getWords3()[iter->second]));
+					}
 				}
-				else if((int)signatureA->getWords().size() >= _minInliers &&
-						(int)signatureB->getWords().size() >= _minInliers)
+				for(std::map<int, int>::iterator iter=uniqueWordsB.begin(); iter!=uniqueWordsB.end(); ++iter)
 				{
-					UASSERT((signatureA->sensorData().stereoCameraModels().size() == 1 && signatureA->sensorData().stereoCameraModels()[0].isValidForProjection()) || (signatureA->sensorData().cameraModels().size() == 1 && signatureA->sensorData().cameraModels()[0].isValidForProjection()));
-					const CameraModel & cameraModel = signatureA->sensorData().stereoCameraModels().size()?signatureA->sensorData().stereoCameraModels()[0].left():signatureA->sensorData().cameraModels()[0];
+					wordsB.insert(std::make_pair(iter->first, toSignature.getWordsKpts()[iter->second]));
+				}
+				std::map<int, cv::Point3f> inliers3D = util3d::generateWords3DMono(
+						wordsA,
+						wordsB,
+						cameraModel,
+						cameraTransform,
+						_PnPReprojError,
+						0.99f,
+						_PnPVarMedianRatio,
+						words3A, // for scale estimation
+						&variance,
+						&matchesV);
+				covariance *= variance;
+				inliers = uKeys(inliers3D);
+				matches = matchesV;
 
-					// we only need the camera transform, send guess words3 for scale estimation
-					Transform cameraTransform;
-					double variance = 1.0f;
-					std::vector<int> matchesV;
-					std::map<int, int> uniqueWordsA = uMultimapToMapUnique(signatureA->getWords());
-					std::map<int, int> uniqueWordsB = uMultimapToMapUnique(signatureB->getWords());
-					std::map<int, cv::KeyPoint> wordsA;
-					std::map<int, cv::Point3f> words3A;
-					std::map<int, cv::KeyPoint> wordsB;
-					for(std::map<int, int>::iterator iter=uniqueWordsA.begin(); iter!=uniqueWordsA.end(); ++iter)
+				if(!cameraTransform.isNull())
+				{
+					if((int)inliers3D.size() >= _minInliers)
 					{
-						wordsA.insert(std::make_pair(iter->first, signatureA->getWordsKpts()[iter->second]));
-						if(!signatureA->getWords3().empty())
+						if(variance <= _epipolarGeometryVar)
 						{
-							words3A.insert(std::make_pair(iter->first, signatureA->getWords3()[iter->second]));
-						}
-					}
-					for(std::map<int, int>::iterator iter=uniqueWordsB.begin(); iter!=uniqueWordsB.end(); ++iter)
-					{
-						wordsB.insert(std::make_pair(iter->first, signatureB->getWordsKpts()[iter->second]));
-					}
-					std::map<int, cv::Point3f> inliers3D = util3d::generateWords3DMono(
-							wordsA,
-							wordsB,
-							cameraModel,
-							cameraTransform,
-							_PnPReprojError,
-							0.99f,
-							words3A, // for scale estimation
-							&variance,
-							&matchesV);
-					covariances[dir] *= variance;
-					inliers[dir] = uKeys(inliers3D);
-					matches[dir] = matchesV;
-
-					if(!cameraTransform.isNull())
-					{
-						if((int)inliers3D.size() >= _minInliers)
-						{
-							if(variance <= _epipolarGeometryVar)
+							if(this->force3DoF())
 							{
-								if(this->force3DoF())
-								{
-									transforms[dir] = cameraTransform.to3DoF();
-								}
-								else
-								{
-									transforms[dir] = cameraTransform;
-								}
+								transform = cameraTransform.to3DoF();
 							}
 							else
 							{
-								msg = uFormat("Variance is too high! (Max %s=%f, variance=%f)", Parameters::kVisEpipolarGeometryVar().c_str(), _epipolarGeometryVar, variance);
-								UINFO(msg.c_str());
+								transform = cameraTransform;
 							}
 						}
 						else
 						{
-							msg = uFormat("Not enough inliers %d < %d", (int)inliers3D.size(), _minInliers);
-							UINFO(msg.c_str());
+							msg = uFormat("Variance is too high! (Max %s=%f, variance=%f)", Parameters::kVisEpipolarGeometryVar().c_str(), _epipolarGeometryVar, variance);
+							UINFO("%s", msg.c_str());
 						}
 					}
 					else
 					{
-						msg = uFormat("No camera transform found");
-						UINFO(msg.c_str());
+						msg = uFormat("Not enough inliers %d < %d", (int)inliers3D.size(), _minInliers);
+						UINFO("%s", msg.c_str());
 					}
-				}
-				else if(signatureA->getWords().size() == 0)
-				{
-					msg = uFormat("No enough features (%d)", (int)signatureA->getWords().size());
-					UWARN(msg.c_str());
 				}
 				else
 				{
-					msg = uFormat("No camera model");
-					UWARN(msg.c_str());
+					msg = uFormat("No camera transform found");
+					UINFO("%s", msg.c_str());
 				}
 			}
-			else if(_estimationType == 1) // PnP
+			else 
 			{
-				UDEBUG("");
-				if((signatureB->sensorData().stereoCameraModels().empty() || !signatureB->sensorData().stereoCameraModels()[0].isValidForProjection()) &&
-				   (signatureB->sensorData().cameraModels().empty() || !signatureB->sensorData().cameraModels()[0].isValidForProjection()))
-				{
-					UERROR("Calibrated camera required. Id=%d Models=%d StereoModels=%d weight=%d",
-							signatureB->id(),
-							(int)signatureB->sensorData().cameraModels().size(),
-							signatureB->sensorData().stereoCameraModels().size(),
-							signatureB->getWeight());
-				}
-#ifndef RTABMAP_OPENGV
-				else if(signatureB->sensorData().cameraModels().size() > 1)
-				{
-					UERROR("Multi-camera 2D-3D PnP registration is only available if rtabmap is built "
-							"with OpenGV dependency. Use 3D-3D registration approach instead for multi-camera.");
-				}
-#endif
-				else
-				{
-					UDEBUG("words from3D=%d to2D=%d", (int)signatureA->getWords3().size(), (int)signatureB->getWords().size());
-					// 3D to 2D
-					if((int)signatureA->getWords3().size() >= _minInliers &&
-					   (int)signatureB->getWords().size() >= _minInliers)
-					{
-						std::vector<int> inliersV;
-						std::vector<int> matchesV;
-						std::map<int, int> uniqueWordsA = uMultimapToMapUnique(signatureA->getWords());
-						std::map<int, int> uniqueWordsB = uMultimapToMapUnique(signatureB->getWords());
-						std::map<int, cv::Point3f> words3A;
-						std::map<int, cv::Point3f> words3B;
-						std::map<int, cv::KeyPoint> wordsB;
-						for(std::map<int, int>::iterator iter=uniqueWordsA.begin(); iter!=uniqueWordsA.end(); ++iter)
-						{
-							words3A.insert(std::make_pair(iter->first, signatureA->getWords3()[iter->second]));
-						}
-						for(std::map<int, int>::iterator iter=uniqueWordsB.begin(); iter!=uniqueWordsB.end(); ++iter)
-						{
-							wordsB.insert(std::make_pair(iter->first, signatureB->getWordsKpts()[iter->second]));
-							if(!signatureB->getWords3().empty())
-							{
-								words3B.insert(std::make_pair(iter->first, signatureB->getWords3()[iter->second]));
-							}
-						}
-
-						std::vector<CameraModel> models;
-						if(signatureB->sensorData().stereoCameraModels().size())
-						{
-							for(size_t i=0; i<signatureB->sensorData().stereoCameraModels().size(); ++i)
-							{
-								models.push_back(signatureB->sensorData().stereoCameraModels()[i].left());
-							}
-						}
-						else
-						{
-							models = signatureB->sensorData().cameraModels();
-						}
-
-						if(models.size()>1)
-						{
-							// Multi-Camera
-							UASSERT(models[0].isValidForProjection());
-
-							transforms[dir] = util3d::estimateMotion3DTo2D(
-									words3A,
-									wordsB,
-									models,
-									_multiSamplingPolicy,
-									_minInliers,
-									_iterations,
-									_PnPReprojError,
-									_PnPFlags,
-									_PnPRefineIterations,
-									_PnPVarMedianRatio,
-									_PnPMaxVar,
-									dir==0?(!guess.isNull()?guess:Transform::getIdentity()):!transforms[0].isNull()?transforms[0].inverse():(!guess.isNull()?guess.inverse():Transform::getIdentity()),
-									words3B,
-									&covariances[dir],
-									&matchesV,
-									&inliersV,
-									_PnPSplitLinearCovarianceComponents);
-							inliers[dir] = inliersV;
-							matches[dir] = matchesV;
-						}
-						else
-						{
-							UASSERT(models.size() == 1 && models[0].isValidForProjection());
-
-							transforms[dir] = util3d::estimateMotion3DTo2D(
-									words3A,
-									wordsB,
-									models[0],
-									_minInliers,
-									_iterations,
-									_PnPReprojError,
-									_PnPFlags,
-									_PnPRefineIterations,
-									_PnPVarMedianRatio,
-									_PnPMaxVar,
-									dir==0?(!guess.isNull()?guess:Transform::getIdentity()):!transforms[0].isNull()?transforms[0].inverse():(!guess.isNull()?guess.inverse():Transform::getIdentity()),
-									words3B,
-									&covariances[dir],
-									&matchesV,
-									&inliersV,
-									_PnPSplitLinearCovarianceComponents);
-							inliers[dir] = inliersV;
-							matches[dir] = matchesV;
-						}
-						UDEBUG("inliers: %d/%d", (int)inliersV.size(), (int)matchesV.size());
-						if(transforms[dir].isNull())
-						{
-							msg = uFormat("Not enough inliers %d/%d (matches=%d) between %d and %d",
-									(int)inliers[dir].size(), _minInliers, (int)matches[dir].size(), signatureA->id(), signatureB->id());
-							UINFO(msg.c_str());
-						}
-						else if(this->force3DoF())
-						{
-							transforms[dir] = transforms[dir].to3DoF();
-						}
-					}
-					else
-					{
-						msg = uFormat("Not enough features in images (old=%d, new=%d, min=%d)",
-								(int)signatureA->getWords3().size(), (int)signatureB->getWords().size(), _minInliers);
-						UINFO(msg.c_str());
-					}
-				}
-
+				msg = uFormat("No enough features < %s=%d (from=%d to=%d)", 
+					Parameters::kVisMinInliers().c_str(), _minInliers, (int)fromSignature.getWords().size(), (int)toSignature.getWords().size());
+				UWARN("%s", msg.c_str());
 			}
+		}
+		else if(_estimationType == 1) // PnP
+		{
+			UDEBUG("");
+			if((toSignature.sensorData().stereoCameraModels().empty() || !toSignature.sensorData().stereoCameraModels()[0].isValidForProjection()) &&
+				(toSignature.sensorData().cameraModels().empty() || !toSignature.sensorData().cameraModels()[0].isValidForProjection()))
+			{
+				UERROR("Calibrated camera required. Id=%d Models=%d StereoModels=%d weight=%d",
+						toSignature.id(),
+						(int)toSignature.sensorData().cameraModels().size(),
+						(int)toSignature.sensorData().stereoCameraModels().size(),
+						toSignature.getWeight());
+			}
+#ifndef RTABMAP_OPENGV
+			else if(toSignature.sensorData().cameraModels().size() > 1)
+			{
+				UERROR("Multi-camera 2D-3D PnP registration is only available if rtabmap is built "
+						"with OpenGV dependency. Use 3D-3D registration approach instead for multi-camera.");
+			}
+#endif
 			else
 			{
-				UDEBUG("");
-				// 3D -> 3D
-				if((int)signatureA->getWords3().size() >= _minInliers &&
-				   (int)signatureB->getWords3().size() >= _minInliers)
+				UDEBUG("words from3D=%d to2D=%d", (int)fromSignature.getWords3().size(), (int)toSignature.getWords().size());
+				// 3D to 2D
+				if((int)fromSignature.getWords3().size() >= _minInliers &&
+					(int)toSignature.getWords().size() >= _minInliers)
 				{
 					std::vector<int> inliersV;
 					std::vector<int> matchesV;
-					std::map<int, int> uniqueWordsA = uMultimapToMapUnique(signatureA->getWords());
-					std::map<int, int> uniqueWordsB = uMultimapToMapUnique(signatureB->getWords());
+					std::map<int, int> uniqueWordsA = uMultimapToMapUnique(fromSignature.getWords());
+					std::map<int, int> uniqueWordsB = uMultimapToMapUnique(toSignature.getWords());
 					std::map<int, cv::Point3f> words3A;
 					std::map<int, cv::Point3f> words3B;
+					std::map<int, cv::KeyPoint> wordsB;
 					for(std::map<int, int>::iterator iter=uniqueWordsA.begin(); iter!=uniqueWordsA.end(); ++iter)
 					{
-						words3A.insert(std::make_pair(iter->first, signatureA->getWords3()[iter->second]));
+						words3A.insert(std::make_pair(iter->first, fromSignature.getWords3()[iter->second]));
 					}
 					for(std::map<int, int>::iterator iter=uniqueWordsB.begin(); iter!=uniqueWordsB.end(); ++iter)
 					{
-						words3B.insert(std::make_pair(iter->first, signatureB->getWords3()[iter->second]));
+						wordsB.insert(std::make_pair(iter->first, toSignature.getWordsKpts()[iter->second]));
+						if(!toSignature.getWords3().empty())
+						{
+							words3B.insert(std::make_pair(iter->first, toSignature.getWords3()[iter->second]));
+						}
 					}
-					transforms[dir] = util3d::estimateMotion3DTo3D(
-							words3A,
-							words3B,
-							_minInliers,
-							_inlierDistance,
-							_iterations,
-							_refineIterations,
-							&covariances[dir],
-							&matchesV,
-							&inliersV);
-					inliers[dir] = inliersV;
-					matches[dir] = matchesV;
+
+					std::vector<CameraModel> models;
+					if(toSignature.sensorData().stereoCameraModels().size())
+					{
+						for(size_t i=0; i<toSignature.sensorData().stereoCameraModels().size(); ++i)
+						{
+							models.push_back(toSignature.sensorData().stereoCameraModels()[i].left());
+						}
+					}
+					else
+					{
+						models = toSignature.sensorData().cameraModels();
+					}
+
+					if(models.size()>1)
+					{
+						// Multi-Camera
+						UASSERT(models[0].isValidForProjection());
+
+						std::vector<std::vector<int> > matchesPerCam;
+						std::vector<std::vector<int> > inliersPerCam;
+
+						transform = util3d::estimateMotion3DTo2D(
+								words3A,
+								wordsB,
+								models,
+								_multiSamplingPolicy,
+								_minInliers,
+								_iterations,
+								_PnPReprojError,
+								_PnPFlags,
+								_PnPRefineIterations,
+								_PnPVarMedianRatio,
+								_PnPMaxVar,
+								!guess.isNull()?guess:Transform::getIdentity(),
+								words3B,
+								&covariance,
+								&matchesPerCam,
+								&inliersPerCam,
+								_PnPSplitLinearCovarianceComponents);
+
+						info.matchesPerCam.resize(matchesPerCam.size());
+						for(size_t i=0; i<matchesPerCam.size(); ++i)
+						{
+							matches.insert(matches.end(), matchesPerCam[i].begin(), matchesPerCam[i].end());
+							info.matchesPerCam[i] = matchesPerCam[i].size();
+						}
+						info.inliersPerCam.resize(inliersPerCam.size());
+						for(size_t i=0; i<inliersPerCam.size(); ++i)
+						{
+							inliers.insert(inliers.end(), inliersPerCam[i].begin(), inliersPerCam[i].end());
+							info.inliersPerCam[i] = inliersPerCam[i].size();
+						}
+					}
+					else
+					{
+						UASSERT(models.size() == 1 && models[0].isValidForProjection());
+
+						transform = util3d::estimateMotion3DTo2D(
+								words3A,
+								wordsB,
+								models[0],
+								_minInliers,
+								_iterations,
+								_PnPReprojError,
+								_PnPFlags,
+								_PnPRefineIterations,
+								_PnPVarMedianRatio,
+								_PnPMaxVar,
+								!guess.isNull()?guess:Transform::getIdentity(),
+								words3B,
+								&covariance,
+								&matchesV,
+								&inliersV,
+								_PnPSplitLinearCovarianceComponents);
+						inliers = inliersV;
+						matches = matchesV;
+					}
 					UDEBUG("inliers: %d/%d", (int)inliersV.size(), (int)matchesV.size());
-					if(transforms[dir].isNull())
+					if(transform.isNull())
 					{
 						msg = uFormat("Not enough inliers %d/%d (matches=%d) between %d and %d",
-								(int)inliers[dir].size(), _minInliers, (int)matches[dir].size(), signatureA->id(), signatureB->id());
-						UINFO(msg.c_str());
+								(int)inliers.size(), _minInliers, (int)matches.size(), fromSignature.id(), toSignature.id());
+						UINFO("%s", msg.c_str());
 					}
 					else if(this->force3DoF())
 					{
-						transforms[dir] = transforms[dir].to3DoF();
+						transform = transform.to3DoF();
 					}
 				}
 				else
 				{
-					msg = uFormat("Not enough 3D features in images (old=%d, new=%d, min=%d)",
-							(int)signatureA->getWords3().size(), (int)signatureB->getWords3().size(), _minInliers);
-					UINFO(msg.c_str());
+					msg = uFormat("Not enough features in images (old=%d, new=%d, min=%d)",
+							(int)fromSignature.getWords3().size(), (int)toSignature.getWords().size(), _minInliers);
+					UINFO("%s", msg.c_str());
 				}
 			}
-		}
 
-		if(!_forwardEstimateOnly)
-		{
-			UDEBUG("from->to=%s", transforms[0].prettyPrint().c_str());
-			UDEBUG("to->from=%s", transforms[1].prettyPrint().c_str());
 		}
-
-		std::vector<int> allInliers = inliers[0];
-		if(inliers[1].size())
+		else
 		{
-			std::set<int> allInliersSet(allInliers.begin(), allInliers.end());
-			unsigned int oi = allInliers.size();
-			allInliers.resize(allInliers.size() + inliers[1].size());
-			for(unsigned int i=0; i<inliers[1].size(); ++i)
+			UDEBUG("");
+			// 3D -> 3D
+			if((int)fromSignature.getWords3().size() >= _minInliers &&
+				(int)toSignature.getWords3().size() >= _minInliers)
 			{
-				if(allInliersSet.find(inliers[1][i]) == allInliersSet.end())
+				std::vector<int> inliersV;
+				std::vector<int> matchesV;
+				std::map<int, int> uniqueWordsA = uMultimapToMapUnique(fromSignature.getWords());
+				std::map<int, int> uniqueWordsB = uMultimapToMapUnique(toSignature.getWords());
+				std::map<int, cv::Point3f> words3A;
+				std::map<int, cv::Point3f> words3B;
+				for(std::map<int, int>::iterator iter=uniqueWordsA.begin(); iter!=uniqueWordsA.end(); ++iter)
 				{
-					allInliers[oi++] = inliers[1][i];
+					words3A.insert(std::make_pair(iter->first, fromSignature.getWords3()[iter->second]));
+				}
+				for(std::map<int, int>::iterator iter=uniqueWordsB.begin(); iter!=uniqueWordsB.end(); ++iter)
+				{
+					words3B.insert(std::make_pair(iter->first, toSignature.getWords3()[iter->second]));
+				}
+				transform = util3d::estimateMotion3DTo3D(
+						words3A,
+						words3B,
+						_minInliers,
+						_inlierDistance,
+						_iterations,
+						_refineIterations,
+						&covariance,
+						&matchesV,
+						&inliersV);
+				inliers = inliersV;
+				matches = matchesV;
+				UDEBUG("inliers: %d/%d", (int)inliersV.size(), (int)matchesV.size());
+				if(transform.isNull())
+				{
+					msg = uFormat("Not enough inliers %d/%d (matches=%d) between %d and %d",
+							(int)inliers.size(), _minInliers, (int)matches.size(), fromSignature.id(), toSignature.id());
+					UINFO("%s", msg.c_str());
+				}
+				else if(this->force3DoF())
+				{
+					transform = transform.to3DoF();
 				}
 			}
-			allInliers.resize(oi);
-		}
-		std::vector<int> allMatches = matches[0];
-		if(matches[1].size())
-		{
-			std::set<int> allMatchesSet(allMatches.begin(), allMatches.end());
-			unsigned int oi = allMatches.size();
-			allMatches.resize(allMatches.size() + matches[1].size());
-			for(unsigned int i=0; i<matches[1].size(); ++i)
+			else
 			{
-				if(allMatchesSet.find(matches[1][i]) == allMatchesSet.end())
-				{
-					allMatches[oi++] = matches[1][i];
-				}
+				msg = uFormat("Not enough 3D features in images (old=%d, new=%d, min=%d)",
+						(int)fromSignature.getWords3().size(), (int)toSignature.getWords3().size(), _minInliers);
+				UINFO("%s", msg.c_str());
 			}
-			allMatches.resize(oi);
 		}
 
 		if(_bundleAdjustment > 0 &&
 			_estimationType < 2 &&
-			!transforms[0].isNull() &&
-			allInliers.size() &&
+			!transform.isNull() &&
+			inliers.size() &&
 			fromSignature.getWords3().size() &&
 			toSignature.getWords().size() &&
 			(fromSignature.sensorData().stereoCameraModels().size() >= 1 || fromSignature.sensorData().cameraModels().size() >= 1) &&
 			(toSignature.sensorData().stereoCameraModels().size() >= 1 || toSignature.sensorData().cameraModels().size() >= 1))
 		{
 			UDEBUG("Refine with bundle adjustment");
-			Optimizer * sba = Optimizer::create(_bundleAdjustment==3?Optimizer::kTypeCeres:_bundleAdjustment==2?Optimizer::kTypeCVSBA:Optimizer::kTypeG2O, _bundleParameters);
+			// _bundleAdjustment matches the Optimizer/Strategy parameter 1:1
+			// (1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba); 0 was filtered out above.
+			Optimizer * sba = Optimizer::create(
+					static_cast<Optimizer::Type>(_bundleAdjustment), _bundleParameters);
 
 			std::map<int, Transform> poses;
 			std::multimap<int, Link> links;
 			std::map<int, cv::Point3f> points3DMap;
 
 			poses.insert(std::make_pair(1, Transform::getIdentity()));
-			poses.insert(std::make_pair(2, transforms[0]));
+			poses.insert(std::make_pair(2, transform));
 
-			for(int i=0;i<2;++i)
-			{
-				UASSERT(covariances[i].cols==6 && covariances[i].rows == 6 && covariances[i].type() == CV_64FC1);
-				if(covariances[i].at<double>(0,0)<=COVARIANCE_LINEAR_EPSILON)
-					covariances[i].at<double>(0,0) = COVARIANCE_LINEAR_EPSILON; // epsilon if exact transform
-				if(covariances[i].at<double>(1,1)<=COVARIANCE_LINEAR_EPSILON)
-					covariances[i].at<double>(1,1) = COVARIANCE_LINEAR_EPSILON; // epsilon if exact transform
-				if(covariances[i].at<double>(2,2)<=COVARIANCE_LINEAR_EPSILON)
-					covariances[i].at<double>(2,2) = COVARIANCE_LINEAR_EPSILON; // epsilon if exact transform
-				if(covariances[i].at<double>(3,3)<=COVARIANCE_ANGULAR_EPSILON)
-					covariances[i].at<double>(3,3) = COVARIANCE_ANGULAR_EPSILON; // epsilon if exact transform
-				if(covariances[i].at<double>(4,4)<=COVARIANCE_ANGULAR_EPSILON)
-					covariances[i].at<double>(4,4) = COVARIANCE_ANGULAR_EPSILON; // epsilon if exact transform
-				if(covariances[i].at<double>(5,5)<=COVARIANCE_ANGULAR_EPSILON)
-					covariances[i].at<double>(5,5) = COVARIANCE_ANGULAR_EPSILON; // epsilon if exact transform
-			}
+			UASSERT(covariance.cols==6 && covariance.rows == 6 && covariance.type() == CV_64FC1);
+			if(covariance.at<double>(0,0)<=COVARIANCE_LINEAR_EPSILON)
+				covariance.at<double>(0,0) = COVARIANCE_LINEAR_EPSILON; // epsilon if exact transform
+			if(covariance.at<double>(1,1)<=COVARIANCE_LINEAR_EPSILON)
+				covariance.at<double>(1,1) = COVARIANCE_LINEAR_EPSILON; // epsilon if exact transform
+			if(covariance.at<double>(2,2)<=COVARIANCE_LINEAR_EPSILON)
+				covariance.at<double>(2,2) = COVARIANCE_LINEAR_EPSILON; // epsilon if exact transform
+			if(covariance.at<double>(3,3)<=COVARIANCE_ANGULAR_EPSILON)
+				covariance.at<double>(3,3) = COVARIANCE_ANGULAR_EPSILON; // epsilon if exact transform
+			if(covariance.at<double>(4,4)<=COVARIANCE_ANGULAR_EPSILON)
+				covariance.at<double>(4,4) = COVARIANCE_ANGULAR_EPSILON; // epsilon if exact transform
+			if(covariance.at<double>(5,5)<=COVARIANCE_ANGULAR_EPSILON)
+				covariance.at<double>(5,5) = COVARIANCE_ANGULAR_EPSILON; // epsilon if exact transform
 
-			cv::Mat cov = covariances[0].clone();
-
-			links.insert(std::make_pair(1, Link(1, 2, Link::kNeighbor, transforms[0], cov.inv())));
-			if(!transforms[1].isNull() && inliers[1].size())
-			{
-				cov = covariances[1].clone();
-				links.insert(std::make_pair(2, Link(2, 1, Link::kNeighbor, transforms[1], cov.inv())));
-			}
-
+			links.insert(std::make_pair(1, Link(1, 2, Link::kNeighbor, transform, covariance.inv())));
 			std::map<int, Transform> optimizedPoses;
 
 			UASSERT((toSignature.sensorData().stereoCameraModels().size()  >= 1 && toSignature.sensorData().stereoCameraModels()[0].isValidForProjection()) ||
@@ -1973,19 +2037,14 @@ Transform RegistrationVis::computeTransformationImpl(
 			models.insert(std::make_pair(2, cameraModelsTo));
 
 			std::map<int, std::map<int, FeatureBA> > wordReferences;
-			std::set<int> sbaOutliers;
+			BAOutliers sbaOutliers;
 			UDEBUG("");
-			for(unsigned int i=0; i<allInliers.size(); ++i)
+			for(unsigned int i=0; i<inliers.size(); ++i)
 			{
-				int wordId = allInliers[i];
+				int wordId = inliers[i];
 				int indexFrom = fromSignature.getWords().find(wordId)->second;
 				const cv::Point3f & pt3D = fromSignature.getWords3()[indexFrom];
-				if(!util3d::isFinite(pt3D))
-				{
-					UASSERT_MSG(!_forwardEstimateOnly, uFormat("3D point %d is not finite!?", wordId).c_str());
-					sbaOutliers.insert(wordId);
-					continue;
-				}
+				UASSERT_MSG(util3d::isFinite(pt3D), uFormat("3D point %d is not finite!?", wordId).c_str());
 
 				points3DMap.insert(std::make_pair(wordId, pt3D));
 
@@ -2053,32 +2112,42 @@ Transform RegistrationVis::computeTransformationImpl(
 				!optimizedPoses.begin()->second.isNull() &&
 				!optimizedPoses.rbegin()->second.isNull())
 			{
-				UDEBUG("Pose optimization: %s -> %s", transforms[0].prettyPrint().c_str(), optimizedPoses.rbegin()->second.prettyPrint().c_str());
+				UDEBUG("Pose optimization: %s -> %s", transform.prettyPrint().c_str(), optimizedPoses.rbegin()->second.prettyPrint().c_str());
 
-				if(sbaOutliers.size())
+				int sbaOutliersCount = 0;
+				for(unsigned int i=0; i<inliers.size(); ++i)
 				{
-					std::vector<int> newInliers(allInliers.size());
-					int oi=0;
-					for(unsigned int i=0; i<allInliers.size(); ++i)
+					BAOutliers::const_iterator iter = sbaOutliers.find(inliers[i]);
+					if(iter != sbaOutliers.end() && iter->second.find(2) != iter->second.end())
 					{
-						if(sbaOutliers.find(allInliers[i]) == sbaOutliers.end())
+						++sbaOutliersCount;
+					}
+				}
+				if(sbaOutliersCount)
+				{
+					std::vector<int> newInliers(inliers.size());
+					int oi=0;
+					for(unsigned int i=0; i<inliers.size(); ++i)
+					{
+						BAOutliers::const_iterator iter = sbaOutliers.find(inliers[i]);
+						if(iter == sbaOutliers.end() || iter->second.find(2) == iter->second.end())
 						{
-							newInliers[oi++] = allInliers[i];
+							newInliers[oi++] = inliers[i];
 						}
 					}
 					newInliers.resize(oi);
-					UDEBUG("BA outliers ratio %f", float(sbaOutliers.size())/float(allInliers.size()));
-					allInliers = newInliers;
+					UDEBUG("BA outliers ratio %f", float(sbaOutliersCount)/float(inliers.size()));
+					inliers = newInliers;
 				}
-				if((int)allInliers.size() < _minInliers)
+				if((int)inliers.size() < _minInliers)
 				{
 					msg = uFormat("Not enough inliers after bundle adjustment %d/%d (matches=%d) between %d and %d",
-							(int)allInliers.size(), _minInliers, (int)allInliers.size()+sbaOutliers.size(), fromSignature.id(), toSignature.id());
-					transforms[0].setNull();
+							(int)inliers.size(), _minInliers, (int)(int)inliers.size()+sbaOutliersCount, fromSignature.id(), toSignature.id());
+					transform.setNull();
 				}
 				else
 				{
-					transforms[0] = optimizedPoses.rbegin()->second;
+					transform = optimizedPoses.rbegin()->second;
 				}
 				// update 3D points, both from and to signatures
 				/*std::multimap<int, cv::Point3f> cpyWordsFrom3 = fromSignature.getWords3();
@@ -2097,36 +2166,16 @@ Transform RegistrationVis::computeTransformationImpl(
 			}
 			else
 			{
-				transforms[0].setNull();
+				transform.setNull();
 			}
-			transforms[1].setNull();
 		}
 
-		info.inliersIDs = allInliers;
-		info.matchesIDs = allMatches;
-		inliersCount = (int)allInliers.size();
-		matchesCount = (int)allMatches.size();
-		if(!transforms[1].isNull())
-		{
-			transforms[1] = transforms[1].inverse();
-			if(transforms[0].isNull())
-			{
-				transform = transforms[1];
-				covariance = covariances[1];
-			}
-			else
-			{
-				transform = transforms[0].interpolate(0.5f, transforms[1]);
-				covariance = (covariances[0]+covariances[1])/2.0f;
-			}
-		}
-		else
-		{
-			transform = transforms[0];
-			covariance = covariances[0];
-		}
+		info.inliersIDs = inliers;
+		info.matchesIDs = matches;
+		inliersCount = (int)inliers.size();
+		matchesCount = (int)matches.size();
 
-		if(!transform.isNull() && !allInliers.empty() && (_minInliersDistributionThr>0.0f || _maxInliersMeanDistance>0.0f))
+		if(!transform.isNull() && !inliers.empty() && (_minInliersDistributionThr>0.0f || _maxInliersMeanDistance>0.0f))
 		{
 			cv::Mat pcaData;
 			std::vector<CameraModel> cameraModelsTo;
@@ -2147,7 +2196,7 @@ Transform RegistrationVis::computeTransformationImpl(
 				{
 					if(cameraModelsTo[0].imageWidth()>0 && cameraModelsTo[0].imageHeight()>0)
 					{
-						pcaData = cv::Mat(allInliers.size(), 2, CV_32FC1);
+						pcaData = cv::Mat(inliers.size(), 2, CV_32FC1);
 					}
 					else
 					{
@@ -2164,11 +2213,11 @@ Transform RegistrationVis::computeTransformationImpl(
 			std::vector<float> distances;
 			if(_maxInliersMeanDistance>0.0f)
 			{
-				distances.reserve(allInliers.size());
+				distances.reserve(inliers.size());
 			}
-			for(unsigned int i=0; i<allInliers.size(); ++i)
+			for(unsigned int i=0; i<inliers.size(); ++i)
 			{
-				std::multimap<int, int>::const_iterator wordsIter = toSignature.getWords().find(allInliers[i]);
+				std::multimap<int, int>::const_iterator wordsIter = toSignature.getWords().find(inliers[i]);
 				if(wordsIter != toSignature.getWords().end() && !toSignature.getWordsKpts().empty())
 				{
 					const cv::KeyPoint & kpt = toSignature.getWordsKpts()[wordsIter->second];
@@ -2202,7 +2251,7 @@ Transform RegistrationVis::computeTransformationImpl(
 
 				if(info.inliersMeanDistance > _maxInliersMeanDistance)
 				{
-					msg = uFormat("The mean distance of the inliers is over %s threshold (%f)",
+					msg = uFormat("The mean distance of the inliers (%f) is over %s threshold (%f)",
 							info.inliersMeanDistance, Parameters::kVisMeanInliersDistance().c_str(), _maxInliersMeanDistance);
 					transform.setNull();
 				}
@@ -2211,9 +2260,11 @@ Transform RegistrationVis::computeTransformationImpl(
 			if(!transform.isNull() && !pcaData.empty())
 			{
 				cv::Mat pcaEigenVectors, pcaEigenValues;
-				cv::PCA pca_analysis(pcaData, cv::Mat(), CV_PCA_DATA_AS_ROW);
+				cv::PCA pca_analysis(pcaData, cv::Mat(), cv::PCA::DATA_AS_ROW);
 				// We take the second eigen value
 				info.inliersDistribution = pca_analysis.eigenvalues.at<float>(0, 1);
+
+				UDEBUG("Visual distribution: %f (eigen values = %f %f)", info.inliersDistribution, pca_analysis.eigenvalues.at<float>(0, 0), pca_analysis.eigenvalues.at<float>(0, 1));
 
 				if(info.inliersDistribution < _minInliersDistributionThr)
 				{
@@ -2237,6 +2288,10 @@ Transform RegistrationVis::computeTransformationImpl(
 	info.matches = matchesCount;
 	info.rejectedMsg = msg;
 	info.covariance = covariance;
+	if(!covariance.empty())
+	{
+		info.variance = covariance.at<double>(0,0);
+	}
 
 	UDEBUG("inliers=%d/%d", info.inliers, info.matches);
 	UDEBUG("transform=%s", transform.prettyPrint().c_str());

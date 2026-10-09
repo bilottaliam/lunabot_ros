@@ -57,7 +57,7 @@ void showUsage()
 			"   rtabmap-reprocess [options] \"input.db\" \"output.db\"\n"
 			"   rtabmap-reprocess [options] \"input1.db;input2.db;input3.db\" \"output.db\"\n"
 			"\n"
-			"   For the second example, only parameters from the first database are used.\n"
+			"   For the second example, only parameters from the first database are used (unless -params_last or -default are used).\n"
 			"   If Mem/IncrementalMemory is false, RTAB-Map is initialized with the first input database,\n"
 			"   then localization-only is done with next databases against the first one.\n"
 			"   To see warnings when loop closures are rejected, add \"--uwarn\" argument.\n"
@@ -71,20 +71,34 @@ void showUsage()
 			"                       from the database. If custom parameters are also set as \n"
 			"                       arguments, they overwrite those in config file and the database.\n"
 			"     -default    Input database's parameters are ignored, using default ones instead.\n"
+			"     -params_last  Parameters of the last database is used instead of the first one (ignored if -default is also used).\n"
 			"     -odom       Recompute odometry. See \"Odom/\" parameters with --params. If -skip option\n"
 			"                 is used, it will be applied to odometry frames, not rtabmap frames. Multi-session\n"
-			"                 cannot be detected in this mode (assuming the database contains continuous frames\n"
-			"                 of a single session).\n"
+			"                 may not be detected correctly if the input covariance between sessions doesn't have 9999.\n"
+			"     -odom_input_guess   Forward input database's odometry (if exists) as guess when recomputing odometry.\n"
+			"     -odom_lin_var #.#   Override computed odometry linear covariance.\n"
+			"     -odom_ang_var #.#   Override computed odometry angular covariance.\n"
 			"     -start #    Start from this node ID.\n"
 			"     -stop #     Last node to process.\n"
 			"     -start_s #  Start from this map session ID.\n"
 			"     -stop_s #   Last map session to process.\n"
+			"     -stop_loop  Stop after the first loop closure is detected.\n"
 			"     -a          Append mode: if Mem/IncrementalMemory is true, RTAB-Map is initialized with the first input database,\n"
 			"                 then next databases are reprocessed on top of the first one.\n"
-			"     -cam #      Camera index to stream. Ignored if a database doesn't contain multi-camera data.\n"
+			"     -cam #      Camera index to stream. Ignored if a database doesn't contain multi-camera data. Can also be multiple \n"
+			"                 indices split by spaces in a string like \"0 2\" to stream cameras 0 and 2 only.\n"
+			"     -cam_tf \"x y z roll pitch yaw\" Camera local transform override(s) without optical rotation. For multi-cameras, \n"
+			"                                      use a \";\" between each transform.\n"
+			"     -cam_tf_lens_offset #.#          Override camera local transform with an y-axis offset before optical rotation. \n"
+			"                                      If -cam_tf is also used, it is combined before optical rotation. For multi-cameras,\n"
+			"                                      -cam_tf should be also used, and explicitly enumerate offsets if they are different, \n"
+			"                                      e.g., \"0.05 0.075\" for two cameras setup.\n"
 			"     -nolandmark Don't republish landmarks contained in input database.\n"
 			"     -nopriors   Don't republish priors contained in input database.\n"
+			"     -noimu      Don't republish IMU contained in input database.\n"
 			"     -pub_loops  Republish loop closures contained in input database.\n"
+			"     -pub_inter_as_normal Republish intermediate nodes as normal nodes.\n"
+			"     -abort_disconnected_sessions Return error if not all sessions are connected together.\n"
 			"     -loc_null   On localization mode, reset localization pose to null and map correction to identity between sessions.\n"
 			"     -gt         When reprocessing a single database, load its original optimized graph, then \n"
 			"                 set it as ground truth for output database. If there was a ground truth in the input database, it will be ignored.\n"
@@ -118,6 +132,8 @@ void sighandler(int sig)
 int loopCount = 0;
 int proxCount = 0;
 int loopCountMotion = 0;
+int loopInter = 0;
+int loopIntra = 0;
 int totalFrames = 0;
 int totalFramesMotion = 0;
 std::vector<float> previousLocalizationDistances;
@@ -216,6 +232,29 @@ void showLocalizationStats(const std::string & outputDatabasePath)
 	++sessionCount;
 }
 
+std::set<int> getMapIds(const std::set<int> & ids, const rtabmap::DBDriver & driver)
+{
+	std::set<int> mapIds;
+	for(auto id: ids)
+	{
+		Transform p;
+		int mapId;
+		int w;
+		std::string l;
+		double s;
+		Transform gt;
+		std::vector<float> v;
+		GPS g;
+		EnvSensors ss;
+
+		if(driver.getNodeInfo(id, p, mapId, w, l, s, gt, v, g, ss) && mapId>=0)
+		{
+			mapIds.insert(mapId);
+		}
+	}
+	return mapIds;
+}
+
 int main(int argc, char * argv[])
 {
 	signal(SIGABRT, &sighandler);
@@ -224,6 +263,15 @@ int main(int argc, char * argv[])
 
 	ULogger::setType(ULogger::kTypeConsole);
 	ULogger::setLevel(ULogger::kError);
+
+	// override help from Parameters to show the whole thing
+	for(int i=1; i<argc; ++i)
+	{
+		if(strcmp(argv[i], "--help") == 0)
+		{
+			showUsage();
+		}
+	}
 
 	ParametersMap customParameters = Parameters::parseArguments(argc, argv);
 
@@ -239,17 +287,27 @@ int main(int argc, char * argv[])
 	bool assemble3dOctoMap = false;
 	bool useDatabaseRate = false;
 	bool useDefaultParameters = false;
+	bool useLastDatabaseParameters = false;
 	bool recomputeOdometry = false;
+	bool useInputOdometryAsGuess = false;
+	double odomLinVarOverride = 0.0;
+	double odomAngVarOverride = 0.0;
 	int startId = 0;
 	int stopId = 0;
 	int startMapId = 0;
 	int stopMapId = -1;
+	bool stopOnLoopClosure = false;
 	bool appendMode = false;
-	int cameraIndex = -1;
+	std::vector<unsigned int> cameraIndices;
+	std::vector<Transform> cameraLocalTransformOverrides;
+	std::vector<float> cameraLocalTransformOffsetOverrides;
 	int framesToSkip = 0;
 	bool ignoreLandmarks = false;
 	bool ignorePriors = false;
+	bool ignoreImu = false;
 	bool republishLoopClosures = false;
+	bool pubInterNodesAsNormalNodes = false;
+	bool abortDisconnectedSessions = false;
 	bool locNull = false;
 	bool originalGraphAsGT = false;
 	bool scanFromDepth = false;
@@ -291,9 +349,46 @@ int main(int argc, char * argv[])
 			useDefaultParameters = true;
 			printf("Using default parameters.\n");
 		}
+		else if(strcmp(argv[i], "-params_last") == 0 || strcmp(argv[i], "--params_last") == 0)
+		{
+			useLastDatabaseParameters = true;
+		}
 		else if(strcmp(argv[i], "-odom") == 0 || strcmp(argv[i], "--odom") == 0)
 		{
 			recomputeOdometry = true;
+		}
+		else if(strcmp(argv[i], "-odom_input_guess") == 0 || strcmp(argv[i], "--odom_input_guess") == 0)
+		{
+			recomputeOdometry = true;
+			useInputOdometryAsGuess = true;
+		}
+		else if (strcmp(argv[i], "-odom_lin_var") == 0 || strcmp(argv[i], "--odom_lin_var") == 0)
+		{
+			++i;
+			if(i < argc - 2)
+			{
+				odomLinVarOverride = uStr2Double(argv[i]);
+				printf("Odometry linear variance overriden to = %f.\n", odomLinVarOverride);
+			}
+			else
+			{
+				printf("-odom_lin_var option requires a value\n");
+				showUsage();
+			}
+		}
+		else if (strcmp(argv[i], "-odom_ang_var") == 0 || strcmp(argv[i], "--odom_ang_var") == 0)
+		{
+			++i;
+			if(i < argc - 2)
+			{
+				odomAngVarOverride = uStr2Double(argv[i]);
+				printf("Odometry angular variance overriden to = %f.\n", odomAngVarOverride);
+			}
+			else
+			{
+				printf("-odom_ang_var option requires a value\n");
+				showUsage();
+			}
 		}
 		else if (strcmp(argv[i], "-start") == 0 || strcmp(argv[i], "--start") == 0)
 		{
@@ -351,6 +446,10 @@ int main(int argc, char * argv[])
 				showUsage();
 			}
 		}
+		else if(strcmp(argv[i], "-stop_loop") == 0 || strcmp(argv[i], "--stop_loop") == 0)
+		{
+			stopOnLoopClosure = true;
+		}
 		else if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--a") == 0)
 		{
 			appendMode = true;
@@ -361,8 +460,48 @@ int main(int argc, char * argv[])
 			++i;
 			if(i < argc - 2)
 			{
-				cameraIndex = atoi(argv[i]);
-				printf("Camera index = %d.\n", cameraIndex);
+				std::list<std::string> indicesStr = uSplit(argv[i], ' ');
+				for(std::list<std::string>::iterator iter=indicesStr.begin(); iter!=indicesStr.end(); ++iter)
+				{
+					cameraIndices.push_back(uStr2Int(*iter));
+					printf("Camera index = %d.\n", cameraIndices.back());
+				}
+			}
+			else
+			{
+				printf("-cam option requires a value\n");
+				showUsage();
+			}
+		}
+		else if (strcmp(argv[i], "-cam_tf") == 0 || strcmp(argv[i], "--cam_tf") == 0)
+		{
+			++i;
+			if(i < argc - 2)
+			{
+				std::list<std::string> tfStr = uSplit(argv[i], ';');
+				for(std::list<std::string>::iterator iter=tfStr.begin(); iter!=tfStr.end(); ++iter)
+				{
+					cameraLocalTransformOverrides.push_back(Transform::fromString(*iter));
+					printf("Camera transform = %s\n", cameraLocalTransformOverrides.back().prettyPrint().c_str());
+				}
+			}
+			else
+			{
+				printf("-cam option requires a value\n");
+				showUsage();
+			}
+		}
+		else if (strcmp(argv[i], "-cam_tf_lens_offset") == 0 || strcmp(argv[i], "--cam_tf_lens_offset") == 0)
+		{
+			++i;
+			if(i < argc - 2)
+			{
+				std::list<std::string> offsetStr = uSplit(argv[i], ' ');
+				for(std::list<std::string>::iterator iter=offsetStr.begin(); iter!=offsetStr.end(); ++iter)
+				{
+					cameraLocalTransformOffsetOverrides.push_back(uStr2Float(*iter));
+					printf("Camera offset = %f\n", cameraLocalTransformOffsetOverrides.back());
+				}
 			}
 			else
 			{
@@ -394,10 +533,25 @@ int main(int argc, char * argv[])
 			ignorePriors = true;
 			printf("Ignoring priors from input database (-nopriors option).\n");
 		}
+		else if(strcmp(argv[i], "-noimu") == 0 || strcmp(argv[i], "--noimu") == 0)
+		{
+			ignoreImu = true;
+			printf("Ignoring IMU from input database (-noimu option).\n");
+		}
 		else if(strcmp(argv[i], "-pub_loops") == 0 || strcmp(argv[i], "--pub_loops") == 0)
 		{
 			republishLoopClosures = true;
 			printf("Republish loop closures from input database (-pub_loops option).\n");
+		}
+		else if(strcmp(argv[i], "-pub_inter_as_normal") == 0 || strcmp(argv[i], "--pub_inter_as_normal") == 0)
+		{
+			pubInterNodesAsNormalNodes = true;
+			printf("Republish intermdiate nodes as normal nodes (-pub_inter_as_normal option).\n");
+		}
+		else if(strcmp(argv[i], "-abort_disconnected_sessions") == 0 || strcmp(argv[i], "--abort_disconnected_sessions") == 0)
+		{
+			abortDisconnectedSessions = true;
+			printf("Will abort if not all sessions are connected at the end (-abort_disconnected_sessions option).\n");
 		}
 		else if(strcmp(argv[i], "-loc_null") == 0 || strcmp(argv[i], "--loc_null") == 0)
 		{
@@ -544,28 +698,32 @@ int main(int argc, char * argv[])
 	std::list<std::string> databases = uSplit(inputDatabasePath, ';');
 	if (databases.empty())
 	{
-		printf("No input database \"%s\" detected!\n", inputDatabasePath.c_str());
-		return -1;
+		printf("[Error] No input database \"%s\" detected!\n", inputDatabasePath.c_str());
+		return 1;
 	}
 	for (std::list<std::string>::iterator iter = databases.begin(); iter != databases.end(); ++iter)
 	{
 		if (!UFile::exists(*iter))
 		{
-			printf("Input database \"%s\" doesn't exist!\n", iter->c_str());
-			return -1;
+			printf("[Error] Input database \"%s\" doesn't exist!\n", iter->c_str());
+			if(uStrContains(inputDatabasePath,":"))
+			{
+				printf("Did you mean \"%s\"?\n", uReplaceChar(inputDatabasePath, ':', ";").c_str());
+			}
+			return 1;
 		}
 
 		if (UFile::getExtension(*iter).compare("db") != 0)
 		{
-			printf("File \"%s\" is not a database format (*.db)!\n", iter->c_str());
-			return -1;
+			printf("[Error] File \"%s\" is not a database format (*.db)! Aborting.\n", iter->c_str());
+			return 1;
 		}
 	}
 
 	if(UFile::getExtension(outputDatabasePath).compare("db") != 0)
 	{
-		printf("File \"%s\" is not a database format (*.db)!\n", outputDatabasePath.c_str());
-		return -1;
+		printf("[Error] File \"%s\" is not a database format (*.db)! Aborting.\n", outputDatabasePath.c_str());
+		return 1;
 	}
 
 	if(UFile::exists(outputDatabasePath))
@@ -574,25 +732,39 @@ int main(int argc, char * argv[])
 	}
 
 	// Get parameters of the first database
-	DBDriver * dbDriver = DBDriver::create();
+	std::shared_ptr<DBDriver> dbDriver(DBDriver::create());
 	if(!dbDriver->openConnection(databases.front(), false))
 	{
-		printf("Failed opening input database!\n");
-		delete dbDriver;
-		return -1;
+		printf("[Error] Failed opening the input database!\n");
+		return 1;
 	}
 
 	ParametersMap parameters;
 	std::string targetVersion;
 	if(!useDefaultParameters)
 	{
-		parameters = dbDriver->getLastParameters();
-		targetVersion = dbDriver->getDatabaseVersion();
-		parameters.insert(ParametersPair(Parameters::kDbTargetVersion(), targetVersion));
+		if(databases.size() > 1 && useLastDatabaseParameters)
+		{
+			printf("Using last database's parameters.\n");
+			std::shared_ptr<DBDriver> lastDbDriver(DBDriver::create());
+			if(!lastDbDriver->openConnection(databases.back(), true))
+			{
+				printf("[Error] Failed opening the last input database!\n");
+				return 1;
+			}
+			parameters = lastDbDriver->getLastParameters();
+			targetVersion = lastDbDriver->getDatabaseVersion();
+		}
+		else
+		{
+			parameters = dbDriver->getLastParameters();
+			targetVersion = dbDriver->getDatabaseVersion();
+		}
 		if(parameters.empty())
 		{
-			printf("WARNING: Failed getting parameters from database, reprocessing will be done with default parameters! Database version may be too old (%s).\n", dbDriver->getDatabaseVersion().c_str());
+			printf("[Warning] Failed getting parameters from database, reprocessing will be done with default parameters! Database version may be too old (%s).\n", targetVersion.c_str());
 		}
+		parameters.insert(ParametersPair(Parameters::kDbTargetVersion(), targetVersion));
 	}
 
 	if(customParameters.size())
@@ -645,7 +817,7 @@ int main(int argc, char * argv[])
 		if(databases.size() > 1)
 		{
 			printf("[Warning] \"pub_loops\" option cannot be used with multiple databases input. "
-					"Disabling \"pub_loops\" to avoid mismatched loop closue ids.\n");
+					"Disabling \"pub_loops\" to avoid mismatched loop closure ids.\n");
 			republishLoopClosures = false;
 		}
 		else
@@ -686,15 +858,33 @@ int main(int argc, char * argv[])
 
 	int totalIds = 0;
 	std::set<int> ids;
-	dbDriver->getAllNodeIds(ids, false, false, !intermediateNodes);
+	dbDriver->getAllNodeIds(ids, false, false, !pubInterNodesAsNormalNodes && !intermediateNodes);
 	if(ids.empty())
 	{
-		printf("Input database doesn't have any nodes saved in it.\n");
+		printf("[Error] Input database doesn't have any nodes saved in it.\n");
 		dbDriver->closeConnection(false);
-		delete dbDriver;
-		return -1;
+		return 1;
 	}
-	if(!((!incrementalMemory || appendMode) && databases.size() > 1))
+
+	int firstDbMapIds = 0;
+	int firstDbLastMapId = -1;
+	firstDbMapIds = getMapIds(ids, *dbDriver).size();
+	if(appendMode || !incrementalMemory)
+	{
+		if(databases.size() < 2)
+		{
+			if(appendMode) {
+				printf("[Error] -a (append mode) requires at least 2 input databases, provided \"%s\"! Aborting.\n", inputDatabasePath.c_str());
+			}
+			else if(!incrementalMemory) {
+				printf("[Error] Localization mode is enabled (%s=false), but it requires at least 2 input databases, provided \"%s\"! Aborting.\n",
+					Parameters::kMemIncrementalMemory().c_str(), inputDatabasePath.c_str());
+			}
+			return 1;
+		}
+		dbDriver->getLastMapId(firstDbLastMapId);
+	}
+	else
 	{
 		totalIds = ids.size();
 	}
@@ -708,26 +898,21 @@ int main(int argc, char * argv[])
 	dbDriver->closeConnection(false);
 
 	// Count remaining ids in the other databases
+	int newDbMapIds = 0;
 	for (std::list<std::string>::iterator iter = ++databases.begin(); iter != databases.end(); ++iter)
 	{
 		if (!dbDriver->openConnection(*iter, false))
 		{
-			printf("Failed opening input database!\n");
-			delete dbDriver;
-			return -1;
+			printf("[Error] Failed opening input database!\n");
+			return 1;
 		}
 		ids.clear();
-		dbDriver->getAllNodeIds(ids, false, false, !intermediateNodes);
+		dbDriver->getAllNodeIds(ids, false, false, !pubInterNodesAsNormalNodes && !intermediateNodes);
 		totalIds += ids.size();
+		newDbMapIds += getMapIds(ids, *dbDriver).size();
 		dbDriver->closeConnection(false);
 	}
-	delete dbDriver;
-	dbDriver = 0;
-
-	if(framesToSkip)
-	{
-		totalIds/=framesToSkip+1;
-	}
+	dbDriver.reset();
 
 	std::string workingDirectory = UDirectory::getDir(outputDatabasePath);
 	printf("Set working directory to \"%s\".\n", workingDirectory.c_str());
@@ -761,6 +946,54 @@ int main(int argc, char * argv[])
 	Parameters::parse(parameters, Parameters::kRGBDEnabled(), rgbdEnabled);
 	bool odometryIgnored = !rgbdEnabled;
 
+	if(rgbdEnabled && appendMode)
+	{
+		// Get the number of sessions linked in the current global graph
+		std::map<int, Transform> poses;
+		std::multimap<int, Link> constraints;
+		rtabmap.getGraph(poses, constraints, /*optimized*/ false, /*global*/ true, 0, false, false, false, false, false, false);
+		std::set<int> mapIds;
+		for(std::map<int, Transform>::iterator iter=poses.begin(); iter!=poses.end(); ++iter)
+		{
+			int id;
+			if((id=rtabmap.getMemory()->getMapId(iter->first, true))>=0)
+			{
+				mapIds.insert(id);
+			}
+		}
+		printf("Sessions in global graph of the initial database: %ld/%d\n", mapIds.size(), firstDbMapIds);
+		firstDbMapIds = mapIds.size();
+	}
+
+	if(!cameraLocalTransformOffsetOverrides.empty())
+	{
+		if(!cameraLocalTransformOverrides.empty() && cameraLocalTransformOffsetOverrides.size() > 1 && cameraLocalTransformOffsetOverrides.size() != cameraLocalTransformOverrides.size())
+		{
+			printf("[Error] -cam_tf_lens_offset size (%ld) is not equal to -cam_tf argument (%ld). "
+				   "-cam_tf_lens_offset should be one to affect all cameras or same size than -cam_tf argument.\n",
+				   cameraLocalTransformOffsetOverrides.size(), cameraLocalTransformOverrides.size());
+			showUsage();
+			return 1;
+		}
+		if(cameraLocalTransformOverrides.empty())
+		{
+			if(cameraLocalTransformOffsetOverrides.size() > 1)
+			{
+				printf("[Error] -cam_tf_lens_offset size (%ld) should be one if -cam_tf is not set.\n",
+				   cameraLocalTransformOffsetOverrides.size());
+				showUsage();
+				return 1;
+			}
+			cameraLocalTransformOverrides.push_back(Transform::getIdentity());
+		}
+		for(size_t i=0; i<cameraLocalTransformOverrides.size(); ++i)
+		{
+			float offset = cameraLocalTransformOffsetOverrides.size()==1?cameraLocalTransformOffsetOverrides[0]:cameraLocalTransformOffsetOverrides[i];
+			cameraLocalTransformOverrides[i] *= Transform(0, offset, 0);
+			printf("Overriding camera's local transform %ld to %s (offset=%f)\n", i, cameraLocalTransformOverrides[i].prettyPrint().c_str(), offset);
+		}
+	}
+
 	DBReader * dbReader = new DBReader(
 			inputDatabasePath,
 			useDatabaseRate?-1:0,
@@ -768,14 +1001,17 @@ int main(int argc, char * argv[])
 			false,
 			false,
 			startId,
-			cameraIndex,
+			cameraIndices,
 			stopId,
-			!intermediateNodes,
+			!pubInterNodesAsNormalNodes && !intermediateNodes,
 			ignoreLandmarks,
 			!useOdomFeatures,
 			startMapId,
 			stopMapId,
-			ignorePriors);
+			ignorePriors,
+			ignoreImu,
+			pubInterNodesAsNormalNodes,
+			cameraLocalTransformOverrides);
 
 	dbReader->init();
 
@@ -793,6 +1029,11 @@ int main(int argc, char * argv[])
 
 	Odometry * odometry = 0;
 	float rtabmapUpdateRate = Parameters::defaultRtabmapDetectionRate();
+	Parameters::parse(parameters, Parameters::kRtabmapDetectionRate(), rtabmapUpdateRate);
+	if(rtabmapUpdateRate!=0)
+	{
+		rtabmapUpdateRate = 1.0f/rtabmapUpdateRate;
+	}
 	double lastUpdateStamp = 0;
 	if(recomputeOdometry)
 	{
@@ -803,14 +1044,18 @@ int main(int argc, char * argv[])
 		}
 		else
 		{
-			printf("Odometry will be recomputed (odom option is set)\n");
-			Parameters::parse(parameters, Parameters::kRtabmapDetectionRate(), rtabmapUpdateRate);
-			if(rtabmapUpdateRate!=0)
-			{
-				rtabmapUpdateRate = 1.0f/rtabmapUpdateRate;
-			}
+			printf("Odometry will be recomputed (\"odom\" option is set)%s.\n",
+				useInputOdometryAsGuess?" with input odometry guess (\"odom_guess_input\" option is set)":"");
 			odometry = Odometry::create(parameters);
 		}
+	}
+	else if(!intermediateNodes && framesToSkip == 0 &&
+		(configParameters.find(Parameters::kRtabmapDetectionRate())!=configParameters.end() ||
+	     customParameters.find(Parameters::kRtabmapDetectionRate())!=customParameters.end()))
+	{
+		printf("[Warning] Parameter %s is ignored because parameter %s=false.\n",
+				Parameters::kRtabmapDetectionRate().c_str(),
+				Parameters::kRtabmapCreateIntermediateNodes().c_str());
 	}
 
 	printf("Reprocessing data of \"%s\"...\n", inputDatabasePath.c_str());
@@ -826,22 +1071,68 @@ int main(int argc, char * argv[])
 	}
 	camThread.postUpdate(&data, &info);
 	Transform lastLocalizationOdomPose = info.odomPose;
+	Transform previousOdomPose;
+	cv::Mat odomCovariance;
 	bool inMotion = true;
 	while(data.isValid() && g_loopForever)
 	{
 		if(recomputeOdometry)
 		{
+			if(useInputOdometryAsGuess && !info.odomCovariance.empty() && info.odomCovariance.at<double>(0,0) >= 9999)
+			{
+				if(!odometry->getPose().isIdentity()) {
+					printf("Reset odometry as input odometry triggered new map\n");
+					odometry->reset(odometry->getPose());
+				}
+				previousOdomPose.setNull();
+			}
 			OdometryInfo odomInfo;
-			Transform pose = odometry->process(data, &odomInfo);
-			printf("Processed %d/%d frames (visual=%d/%d lidar=%f lost=%s)... odometry = %dms\n",
+			Transform pose = odometry->process(data, 
+				(useInputOdometryAsGuess && !info.odomPose.isNull() && !previousOdomPose.isNull())?previousOdomPose.inverse() * info.odomPose:Transform(),
+				&odomInfo);
+			if(!pose.isNull() && odomInfo.reg.covariance.total() == 36)
+			{
+				previousOdomPose = info.odomPose;
+				if(odomLinVarOverride > 0.0)
+				{
+					odomInfo.reg.covariance.at<double>(0,0) = odomLinVarOverride;
+					odomInfo.reg.covariance.at<double>(1,1) = odomLinVarOverride;
+					odomInfo.reg.covariance.at<double>(2,2) = odomLinVarOverride;
+				}
+				if(odomAngVarOverride > 0.0)
+				{
+					odomInfo.reg.covariance.at<double>(3,3) = odomAngVarOverride;
+					odomInfo.reg.covariance.at<double>(4,4) = odomAngVarOverride;
+					odomInfo.reg.covariance.at<double>(5,5) = odomAngVarOverride;
+				}
+				if(uIsFinite(odomInfo.reg.covariance.at<double>(0,0)) &&
+					odomInfo.reg.covariance.at<double>(0,0)>0.0)
+				{
+					if( useInputOdometryAsGuess && 
+						odomInfo.reg.covariance.at<double>(0,0) >= 9999 && 
+						!previousOdomPose.isNull() &&
+						(pose.x() != 0.0f || pose.y() != 0.0f || pose.z() != 0.0f)) // not the first frame
+					{
+						// In case of external guess and auto reset, keep reporting lost till we
+						// process the second frame with valid covariance. This way it
+						// won't trigger a new map.
+						pose = Transform();
+					}
+					// Use largest covariance error (to be independent of the odometry frame rate)
+					else if(odomCovariance.empty() || odomInfo.reg.covariance.at<double>(0,0) > odomCovariance.at<double>(0,0))
+					{
+						odomCovariance = odomInfo.reg.covariance;
+					}
+				}
+			}
+			printf("Processed %d/%d frames (visual=%s lidar=%s lost=%s)... odometry = %dms\n",
 					processed+1,
 					totalIds,
-					odomInfo.reg.inliers,
-					odomInfo.reg.matches,
-					odomInfo.reg.icpInliersRatio,
+					odomInfo.reg.matches!=0?uFormat("%d/%d", odomInfo.reg.inliers, odomInfo.reg.matches).c_str():"NA",
+					odomInfo.reg.icpInliersRatio!=0.0?uNumber2Str(odomInfo.reg.icpInliersRatio).c_str():"NA",
 					odomInfo.lost?"true":"false",
 					int(odomInfo.timeEstimation * 1000));
-			if(lastUpdateStamp > 0.0 && data.stamp() < lastUpdateStamp + rtabmapUpdateRate)
+			if(lastUpdateStamp > 0.0 && (data.stamp() < lastUpdateStamp + rtabmapUpdateRate || framesToSkip>0))
 			{
 				if(framesToSkip>0)
 				{
@@ -853,23 +1144,39 @@ int main(int argc, char * argv[])
 					}
 				}
 
-				data = dbReader->takeData(&info);
-				if(scanFromDepth)
+				if(framesToSkip==0 && intermediateNodes)
 				{
-					data.setLaserScan(LaserScan());
+					data.setId(-1); // intermediate node
 				}
-				camThread.postUpdate(&data, &info);
-				++processed;
-				continue;
+				else
+				{
+					data = dbReader->takeData(&info);
+					if(scanFromDepth)
+					{
+						data.setLaserScan(LaserScan());
+					}
+					camThread.postUpdate(&data, &info);
+					++processed;
+					continue;
+				}
 			}
 			info.odomPose = pose;
-			info.odomCovariance = odomInfo.reg.covariance;
-			lastUpdateStamp = data.stamp();
+			info.odomCovariance = odomCovariance;
+			odomCovariance = cv::Mat();
+
+			uInsert(globalMapStats, odomInfo.statistics(pose));
 		}
+		else if(framesToSkip==0 && intermediateNodes && lastUpdateStamp > 0.0 && data.stamp() > lastUpdateStamp && (data.stamp() < lastUpdateStamp + rtabmapUpdateRate))
+		{
+			data.setId(-1); // intermediate node
+		}
+
+		if(data.id() != -1)
+			lastUpdateStamp = data.stamp();
 
 		UTimer iterationTime;
 		std::string status;
-		if(!odometryIgnored && info.odomPose.isNull())
+		if(!odometryIgnored && info.odomPose.isNull() && incrementalMemory)
 		{
 			printf("Skipping node %d as it doesn't have odometry pose set.\n", data.id());
 		}
@@ -1023,8 +1330,9 @@ int main(int argc, char * argv[])
 
 		const rtabmap::Statistics & stats = rtabmap.getStatistics();
 		int refId = stats.refImageId();
+		bool rejected = uValue(stats.data(), rtabmap::Statistics::kLoopRejectedHypothesis(), 0.0f) != 0.0f;
 		int loopId = stats.loopClosureId() > 0? stats.loopClosureId(): stats.proximityDetectionId() > 0?stats.proximityDetectionId() :0;
-		int landmarkId = (int)uValue(stats.data(), rtabmap::Statistics::kLoopLandmark_detected(), 0.0f);
+		int landmarkId = rejected?0:(int)uValue(stats.data(), rtabmap::Statistics::kLoopLandmark_detected(), 0.0f);
 		int refMapId = stats.refImageMapId();
 		++totalFrames;
 
@@ -1047,15 +1355,32 @@ int main(int argc, char * argv[])
 				++loopCountMotion;
 			}
 			int loopMapId = stats.loopClosureId() > 0? stats.loopClosureMapId(): stats.proximityDetectionMapId();
-			printf("Processed %d/%d nodes [id=%d map=%d opt_graph=%d]... %dms %s on %d [%d]\n", ++processed, totalIds, refId, refMapId, int(stats.poses().size()), int(iterationTime.ticks() * 1000), stats.loopClosureId() > 0?"Loop":"Prox", loopId, loopMapId);
+			if(loopMapId != stats.refImageMapId())
+			{
+				++loopInter;
+			}
+			else
+			{
+				++loopIntra;
+			}
+			printf("[%f] Processed %d/%d nodes [id=%d map=%d graph=%d hyp=%d]... %dms %s on %d [%d]\n", data.stamp(), ++processed, totalIds, refId, refMapId, int(stats.poses().size()), int(uValue(stats.data(), Statistics::kLoopHighest_hypothesis_value())*100.0f), int(iterationTime.ticks() * 1000), stats.loopClosureId() > 0?"Loop":"Prox", loopId, loopMapId);
+			if(stopOnLoopClosure)
+			{
+				printf("First loop closure has been detected and --stop_loop option is enabled, stop processing...\n");
+				break;
+			}
 		}
 		else if(landmarkId != 0)
 		{
-			printf("Processed %d/%d nodes [id=%d map=%d opt_graph=%d]... %dms Loop on landmark %d\n", ++processed, totalIds, refId, refMapId, int(stats.poses().size()),  int(iterationTime.ticks() * 1000), landmarkId);
+			printf("[%f] Processed %d/%d nodes [id=%d map=%d graph=%d hyp=%d]... %dms Loop on landmark %d\n", data.stamp(), ++processed, totalIds, refId, refMapId, int(stats.poses().size()), int(uValue(stats.data(), Statistics::kLoopHighest_hypothesis_value())*100.0f),  int(iterationTime.ticks() * 1000), landmarkId);
+		}
+		else if(data.id() == -1)
+		{
+			printf("[%f] Processed %d/%d nodes [id=%d map=%d graph=%d hyp=%d]... %dms Intermediate node\n", data.stamp(), ++processed, totalIds, refId, refMapId, int(stats.poses().size()), int(uValue(stats.data(), Statistics::kLoopHighest_hypothesis_value())*100.0f),  int(iterationTime.ticks() * 1000));
 		}
 		else
 		{
-			printf("Processed %d/%d nodes [id=%d map=%d opt_graph=%d]... %dms\n", ++processed, totalIds, refId, refMapId, int(stats.poses().size()), int(iterationTime.ticks() * 1000));
+			printf("[%f] Processed %d/%d nodes [id=%d map=%d graph=%d hyp=%d]... %dms\n", data.stamp(), ++processed, totalIds, refId, refMapId, int(stats.poses().size()), int(uValue(stats.data(), Statistics::kLoopHighest_hypothesis_value())*100.0f), int(iterationTime.ticks() * 1000));
 		}
 
 		// Here we accumulate statistics about distance from last localization
@@ -1079,15 +1404,22 @@ int main(int argc, char * argv[])
 				localizationAngleVariations.push_back(stats.data().at(Statistics::kLoopOdom_correction_angle()));
 			}
 
-			if(exportPoses && !info.odomPose.isNull())
+			if(exportPoses)
 			{
-				if(!odomTrajectoryPoses.empty())
+				if(!info.odomPose.isNull())
 				{
-					int previousId = odomTrajectoryPoses.rbegin()->first;
-					odomTrajectoryLinks.insert(std::make_pair(previousId, Link(previousId, refId, Link::kNeighbor, odomTrajectoryPoses.rbegin()->second.inverse()*info.odomPose, info.odomCovariance)));
+					if(!odomTrajectoryPoses.empty())
+					{
+						int previousId = odomTrajectoryPoses.rbegin()->first;
+						odomTrajectoryLinks.insert(std::make_pair(previousId, Link(previousId, refId, Link::kNeighbor, odomTrajectoryPoses.rbegin()->second.inverse()*info.odomPose, info.odomCovariance)));
+					}
+					odomTrajectoryPoses.insert(std::make_pair(refId, info.odomPose));
+					localizationPoses.insert(std::make_pair(refId, stats.mapCorrection()*info.odomPose));
 				}
-				odomTrajectoryPoses.insert(std::make_pair(refId, info.odomPose));
-				localizationPoses.insert(std::make_pair(refId, stats.mapCorrection()*info.odomPose));
+				else
+				{
+					localizationPoses.insert(std::make_pair(refId, rtabmap.getLastLocalizationPose()));
+				}
 			}
 		}
 
@@ -1126,7 +1458,7 @@ int main(int argc, char * argv[])
 		   !info.odomPose.isNull())
 		{
 			float distance = odomPose.getDistance(info.odomPose);
-			float angle = (odomPose.inverse()*info.odomPose).getAngle();
+			float angle = odomPose.getAngle(info.odomPose);
 			odomDistances.push_back(distance);
 			if(distance < linearUpdate && angle <= angularUpdate)
 			{
@@ -1135,30 +1467,67 @@ int main(int argc, char * argv[])
 		}
 	}
 
-	int databasesMerged = 0;
 	if(!incrementalMemory)
 	{
 		showLocalizationStats(outputDatabasePath);
 	}
 	else
 	{
-		printf("Total loop closures = %d (Loop=%d, Prox=%d, In Motion=%d/%d)\n", loopCount+proxCount, loopCount, proxCount, loopCountMotion, totalFramesMotion);
+		printf("Total loop closures = %d (Loop=%d, Prox=%d, In Motion=%d/%d, Intra=%d, Inter=%d)\n",
+			loopCount+proxCount, loopCount, proxCount, loopCountMotion, totalFramesMotion, loopIntra, loopInter);
 
-		if(databases.size()>1)
+		if(rgbdEnabled && incrementalMemory)
 		{
 			std::map<int, Transform> poses;
 			std::multimap<int, Link> constraints;
-			rtabmap.getGraph(poses, constraints, 0, 1, 0, false, false, false, false, false, false);
+			rtabmap.getGraph(poses, constraints, /*optimized*/ false, /*global*/ true, 0, false, false, false, false, false, false);
 			std::set<int> mapIds;
+			std::set<int> newMapIds;
 			for(std::map<int, Transform>::iterator iter=poses.begin(); iter!=poses.end(); ++iter)
 			{
 				int id;
 				if((id=rtabmap.getMemory()->getMapId(iter->first, true))>=0)
 				{
 					mapIds.insert(id);
+					if(id>firstDbLastMapId)
+					{
+						newMapIds.insert(id);
+					}
 				}
 			}
-			databasesMerged = mapIds.size();
+			printf("Sessions linked to the last pose: %ld/%d\n", mapIds.size(), firstDbMapIds + newDbMapIds);
+			if(appendMode)
+			{
+				printf("New sessions connected to the global graph: %ld/%d\n", newMapIds.size(), newDbMapIds);
+				// Check if all new sessions were appended to the original graph.
+				if((int)newMapIds.size() != newDbMapIds)
+				{
+					if(abortDisconnectedSessions) {
+						printf("[Error] Not all new sessions are connected (option -abort_disconnected_sessions is set).\n");
+						return 1;
+					}
+					printf("[Warning] Not all new sessions are connected. Add option -abort_disconnected_sessions to report this as an error.\n");
+				}
+				if(mapIds.size() == newMapIds.size())
+				{
+					if(abortDisconnectedSessions) {
+						printf("[Error] The new sessions are not connected to original map (option -abort_disconnected_sessions is set).\n");
+						return 1;
+					}
+					printf("[Warning] The new sessions are not connected to original map. Add option -abort_disconnected_sessions to report this as an error.\n");
+				}
+			}
+			else // we reprocessed everything
+			{
+				if((int)mapIds.size() != firstDbMapIds + newDbMapIds)
+				{
+					if(abortDisconnectedSessions) {
+						printf("[Error] Not all sessions are connected (option -abort_disconnected_sessions is set).\n");
+						return 1;
+					}
+					printf("[Warning] Not all sessions are connected. Add option -abort_disconnected_sessions to report this as an error.\n");
+				}
+			}
 		}
 	}
 
@@ -1177,13 +1546,12 @@ int main(int argc, char * argv[])
 		{
 			if(save2DMap)
 			{
-				DBDriver * driver = DBDriver::create();
+				std::shared_ptr<DBDriver> driver(DBDriver::create());
 				if(driver->openConnection(outputDatabasePath))
 				{
 					driver->save2DMap(map, xMin, yMin, grid.getCellSize());
 					printf("Saving occupancy grid to database... done!\n");
 				}
-				delete driver;
 			}
 			else
 			{
@@ -1272,13 +1640,12 @@ int main(int argc, char * argv[])
 		{
 			if(save2DMap)
 			{
-				DBDriver * driver = DBDriver::create();
+				std::shared_ptr<DBDriver> driver(DBDriver::create());
 				if(driver->openConnection(outputDatabasePath))
 				{
 					driver->save2DMap(map, xMin, yMin, cellSize);
 					printf("Saving occupancy grid to database... done!\n");
 				}
-				delete driver;
 			}
 			else
 			{
@@ -1360,5 +1727,5 @@ int main(int argc, char * argv[])
 	}
 #endif
 
-	return databasesMerged;
+	return 0;
 }

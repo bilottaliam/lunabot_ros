@@ -35,10 +35,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/odometry/OdometryORBSLAM3.h"
 #include "rtabmap/core/odometry/OdometryLOAM.h"
 #include "rtabmap/core/odometry/OdometryFLOAM.h"
+#include "rtabmap/core/odometry/OdometryLIOSAM.h"
 #include "rtabmap/core/odometry/OdometryMSCKF.h"
-#include "rtabmap/core/odometry/OdometryVINS.h"
+#include "rtabmap/core/odometry/OdometryVINSFusion.h"
 #include "rtabmap/core/odometry/OdometryOpenVINS.h"
 #include "rtabmap/core/odometry/OdometryOpen3D.h"
+#include "rtabmap/core/odometry/OdometryCuVSLAM.h"
 #include "rtabmap/core/OdometryInfo.h"
 #include "rtabmap/core/util3d.h"
 #include "rtabmap/core/util3d_mapping.h"
@@ -100,17 +102,23 @@ Odometry * Odometry::create(Odometry::Type & type, const ParametersMap & paramet
 	case Odometry::kTypeFLOAM:
 		odometry = new OdometryFLOAM(parameters);
 		break;
+	case Odometry::kTypeLIOSAM:
+		odometry = new OdometryLIOSAM(parameters);
+		break;
 	case Odometry::kTypeMSCKF:
 		odometry = new OdometryMSCKF(parameters);
 		break;
-	case Odometry::kTypeVINS:
-		odometry = new OdometryVINS(parameters);
+	case Odometry::kTypeVINSFusion:
+		odometry = new OdometryVINSFusion(parameters);
 		break;
 	case Odometry::kTypeOpenVINS:
 		odometry = new OdometryOpenVINS(parameters);
 		break;
 	case Odometry::kTypeOpen3D:
 		odometry = new OdometryOpen3D(parameters);
+		break;
+	case Odometry::kTypeCuVSLAM:
+		odometry = new OdometryCuVSLAM(parameters);
 		break;
 	default:
 		UERROR("Unknown odometry type %d, using F2M instead...", (int)type);
@@ -322,7 +330,9 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 				Transform previous = this->getPose();
 				Transform newFramePose = Transform(previous.x(), previous.y(), previous.z(), imuQuat.x(), imuQuat.y(), imuQuat.z(), imuQuat.w());
 				UWARN("Updated initial pose from %s to %s with IMU orientation", previous.prettyPrint().c_str(), newFramePose.prettyPrint().c_str());
+				std::map<double, rtabmap::Transform> imus = imus_;
 				this->reset(newFramePose);
+				imus_ = imus;
 			}
 
 			imus_.insert(std::make_pair(data.stamp(), imuT));
@@ -335,6 +345,15 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 		{
 			UWARN("Received IMU doesn't have orientation set! It is ignored.");
 		}
+	}
+
+	if((data.imageRaw().empty() && !data.imageCompressed().empty()) ||
+	   (data.depthOrRightRaw().empty() && !data.depthOrRightCompressed().empty()) ||
+	   (data.laserScanRaw().empty() && !data.laserScanCompressed().empty()))
+	{
+		UDEBUG("Received compressed data, uncompressing...");
+		data.uncompressData();
+		UDEBUG("Received compressed data, uncompressing...done!");
 	}
 
 	if(!data.imageRaw().empty())
@@ -614,6 +633,7 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 	if(!guessIn.isNull())
 	{
 		guess = guessIn;
+		UDEBUG("Using provided guess %s", guessIn.prettyPrint().c_str());
 	}
 	else if(!imus_.empty())
 	{
@@ -630,11 +650,15 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 			{
 				guess = guess.to3DoF();
 			}
+			UDEBUG("Adjusting guess from motion with IMU %s", guess.prettyPrint().c_str());
 		}
 		else if(!imuLastTransform_.isNull())
 		{
 			UWARN("Could not find imu transform at %f", data.stamp());
 		}
+	}
+	else if(!guess.isNull() && (!data.imageRaw().empty() || !data.laserScanRaw().isEmpty())) {
+		UDEBUG("Using guess from motion %s", guess.prettyPrint().c_str());
 	}
 
 	UTimer time;
@@ -755,6 +779,26 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 		}
 
 
+		// Features that came with the frame are placed in the full size image, while what
+		// is about to be registered is the decimated one and the calibration that goes
+		// with it, so bring them along. They are scaled back below with whatever the
+		// registration returns, leaving the caller its own frame of reference.
+		if(!decimatedData.keypoints().empty())
+		{
+			std::vector<cv::KeyPoint> decimatedKpts = decimatedData.keypoints();
+			double log2value = log(double(_imageDecimation))/log(2.0);
+			for(unsigned int i=0; i<decimatedKpts.size(); ++i)
+			{
+				decimatedKpts[i].pt.x /= _imageDecimation;
+				decimatedKpts[i].pt.y /= _imageDecimation;
+				decimatedKpts[i].size /= _imageDecimation;
+				// Never below the finest level of the decimated image, which is as fine
+				// as its detail goes; ORB refuses a negative octave outright.
+				decimatedKpts[i].octave = std::max(0, int(decimatedKpts[i].octave - log2value));
+			}
+			decimatedData.setFeatures(decimatedKpts, decimatedData.keypoints3D(), decimatedData.descriptors());
+		}
+
 		// compute transform
 		t = this->computeTransform(decimatedData, guess, info);
 
@@ -793,7 +837,14 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 			}
 		}
 	}
-	else if(!data.imageRaw().empty() || !data.laserScanRaw().isEmpty() || (this->canProcessAsyncIMU() && !data.imu().empty()))
+	// A frame that brings its own features carries no image, and a frame whose scene was
+	// empty carries no feature either, so neither says whether there is a frame at all.
+	// The calibration does: it is there when a camera produced this data.
+	else if(!data.imageRaw().empty() ||
+			!data.cameraModels().empty() ||
+			!data.stereoCameraModels().empty() ||
+			!data.laserScanRaw().isEmpty() ||
+			(this->canProcessAsyncIMU() && !data.imu().empty()))
 	{
 		t = this->computeTransform(data, guess, info);
 	}
@@ -1000,21 +1051,28 @@ Transform Odometry::process(SensorData & data, const Transform & guessIn, Odomet
 		--_resetCurrentCount;
 		if(_resetCurrentCount == 0)
 		{
-			UWARN("Odometry automatically reset to latest pose!");
-			this->reset(_pose);
+			if(!guess.isNull() && !guessIn.isNull()) {
+				UWARN("Odometry automatically reset to latest pose (%s) + guess (%s)!", _pose.prettyPrint().c_str(), guess.prettyPrint().c_str());
+				this->reset(_pose * guess);
+			}
+			else {
+				UWARN("Odometry automatically reset to latest pose (%s)!", _pose.prettyPrint().c_str());
+				this->reset(_pose);
+			}
 			_resetCurrentCount = _resetCountdown;
 			if(info)
 			{
 				*info = OdometryInfo();
 			}
-			return this->computeTransform(data, Transform(), info);
+			this->computeTransform(data, Transform(), info);
+			return _pose;
 		}
-	}
 
 	previousVelocities_.clear();
 	velocityGuess_.setNull();
 	previousStamp_ = 0;
 
+}
 	return Transform();
 }
 
@@ -1044,6 +1102,7 @@ void Odometry::initKalmanFilter(const Transform & initialPose, float vx, float v
 	    0, 0, 0, 0, 0, 0.17 } };
 	static const boost::array<double, 36> STANDARD_TWIST_COVARIANCE =
 	{ { 0.05, 0, 0, 0, 0, 0,
+	}
 	    0, 0.05, 0, 0, 0, 0,
 	    0, 0, 0.05, 0, 0, 0,
 	    0, 0, 0, 0.09, 0, 0,

@@ -90,6 +90,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "rtabmap_conversions/MsgConversion.h"
 
+#ifdef PRE_ROS_JAZZY
+namespace rclcpp {
+	rmw_qos_profile_t ServicesQoS() {return rmw_qos_profile_services_default;}
+	rmw_qos_profile_t ParametersQoS() {return rmw_qos_profile_parameters;}
+}
+#endif
+
 using namespace rtabmap;
 
 namespace rtabmap_slam {
@@ -114,6 +121,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 		landmarkDefaultAngVariance_(0.001),
 		landmarkDefaultLinVariance_(0.001),
 		waitForTransform_(0.2),// 200 ms
+		stalenessFactor_(0.0),
 		useActionForGoal_(false),
 		useSavedMap_(true),
 		genScan_(false),
@@ -131,7 +139,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 		tfThreadRunning_(false),
 		interOdomSync_(0),
 		stereoToDepth_(false),
-		odomSensorSync_(false),
+		odomSensorSync_(true),
 		rate_(Parameters::defaultRtabmapDetectionRate()),
 		createIntermediateNodes_(Parameters::defaultRtabmapCreateIntermediateNodes()),
 		mappingMaxNodes_(Parameters::defaultGridGlobalMaxNodes()),
@@ -145,7 +153,6 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	char * rosHomePath = getenv("ROS_HOME");
 	std::string workingDir = rosHomePath?rosHomePath:UDirectory::homeDir()+"/.ros";
 	databasePath_ = workingDir+"/"+rtabmap::Parameters::getDefaultDatabaseName();
-	globalPose_.header.stamp = rclcpp::Time(0);
 
 	mapsManager_.init(*this, this->get_name(), true);
 
@@ -153,7 +160,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 	tfBuffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
 	tfListener_ = std::make_shared<tf2_ros::TransformListener>(*tfBuffer_);
-	tfBroadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+	tfBroadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
 
 	bool publishTf = true;
 	std::string initialPoseStr;
@@ -201,6 +208,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	
 	pubLocPoseOnlyWhenLocalizing_ = this->declare_parameter("pub_loc_pose_only_when_localizing", pubLocPoseOnlyWhenLocalizing_);
 	waitForTransform_ = this->declare_parameter("wait_for_transform", waitForTransform_);
+	stalenessFactor_ = this->declare_parameter("staleness_factor", stalenessFactor_);
 	initialPoseStr = this->declare_parameter("initial_pose", initialPoseStr);
 	useActionForGoal_ = this->declare_parameter("use_action_for_goal", useActionForGoal_);
 #ifndef WITH_NAV2_MSGS
@@ -224,27 +232,29 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 	stereoToDepth_ = this->declare_parameter("stereo_to_depth", stereoToDepth_);
 	odomSensorSync_ = this->declare_parameter("odom_sensor_sync", odomSensorSync_);
+	bool interOdomInfo = false;
+	interOdomInfo = this->declare_parameter("subscribe_inter_odom_info", interOdomInfo);
 
-	RCLCPP_INFO(this->get_logger(), "rtabmap: frame_id      = %s", frameId_.c_str());
-	if(!odomFrameId_.empty())
-	{
-		RCLCPP_INFO(this->get_logger(), "rtabmap: odom_frame_id = %s", odomFrameId_.c_str());
-	}
-	if(!groundTruthFrameId_.empty())
-	{
-		RCLCPP_INFO(this->get_logger(), "rtabmap: ground_truth_frame_id = %s -> ground_truth_base_frame_id = %s",
-				groundTruthFrameId_.c_str(),
-				groundTruthBaseFrameId_.c_str());
-	}
-	RCLCPP_INFO(this->get_logger(), "rtabmap: map_frame_id  = %s", mapFrameId_.c_str());
+	RCLCPP_INFO(this->get_logger(), "rtabmap: frame_id      = \"%s\"", frameId_.c_str());
+	RCLCPP_INFO(this->get_logger(), "rtabmap: odom_frame_id = \"%s\"", odomFrameId_.c_str());
+	RCLCPP_INFO(this->get_logger(), "rtabmap: ground_truth_frame_id = \"%s\" -> ground_truth_base_frame_id = \"%s\"",
+			groundTruthFrameId_.c_str(),
+			groundTruthBaseFrameId_.c_str());
+	RCLCPP_INFO(this->get_logger(), "rtabmap: map_frame_id  = \"%s\"", mapFrameId_.c_str());
 	RCLCPP_INFO(this->get_logger(), "rtabmap: log_to_rosout_level  = %d", eventLevel);
-	RCLCPP_INFO(this->get_logger(), "rtabmap: initial_pose  = %s", initialPoseStr.c_str());
+	RCLCPP_INFO(this->get_logger(), "rtabmap: initial_pose  = \"%s\"", initialPoseStr.c_str());
 	RCLCPP_INFO(this->get_logger(), "rtabmap: use_action_for_goal  = %s", useActionForGoal_?"true":"false");
 	RCLCPP_INFO(this->get_logger(), "rtabmap: tf_delay      = %f", tfDelay);
 	RCLCPP_INFO(this->get_logger(), "rtabmap: tf_tolerance  = %f", tfTolerance);
 	RCLCPP_INFO(this->get_logger(), "rtabmap: odom_sensor_sync   = %s", odomSensorSync_?"true":"false");
 	RCLCPP_INFO(this->get_logger(), "rtabmap: pub_loc_pose_only_when_localizing = %s", pubLocPoseOnlyWhenLocalizing_?"true":"false");
 	RCLCPP_INFO(this->get_logger(), "rtabmap: wait_for_transform = %f", waitForTransform_);
+	if(stalenessFactor_!=0.0 && stalenessFactor_ < 1.0) {
+		RCLCPP_ERROR(this->get_logger(), "rtabmap: staleness_factor should be 0 (disabled) or >= 1 (value that multiplies the detection update period). Current value is %f, setting it to 0...",
+			stalenessFactor_);
+		stalenessFactor_ = 0.0;
+	}
+	RCLCPP_INFO(this->get_logger(), "rtabmap: staleness_factor = %f", stalenessFactor_);
 	if(this->isSubscribedToStereo())
 	{
 		RCLCPP_INFO(this->get_logger(), "rtabmap: stereo_to_depth = %s", stereoToDepth_?"true":"false");
@@ -281,7 +291,14 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 	infoPub_ = this->create_publisher<rtabmap_msgs::msg::Info>("info", 1);
 	mapDataPub_ = this->create_publisher<rtabmap_msgs::msg::MapData>("mapData", 1);
-	mapGraphPub_ = this->create_publisher<rtabmap_msgs::msg::MapGraph>("mapGraph", rclcpp::QoS(1).reliable().durability(mapsManager_.isLatching()?RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL:RMW_QOS_POLICY_DURABILITY_VOLATILE));
+	// Intra-process communication doesn't support transient local durability: when latching,
+	// disable it on this publisher, otherwise keep the node's setting.
+	rclcpp::PublisherOptions latchedPubOptions;
+	if(mapsManager_.isLatching())
+	{
+		latchedPubOptions.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
+	}
+	mapGraphPub_ = this->create_publisher<rtabmap_msgs::msg::MapGraph>("mapGraph", rclcpp::QoS(1).reliable().durability(mapsManager_.isLatching()?RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL:RMW_QOS_POLICY_DURABILITY_VOLATILE), latchedPubOptions);
 	odomCachePub_ = this->create_publisher<rtabmap_msgs::msg::MapGraph>("mapOdomCache", 1);
 	landmarksPub_ = this->create_publisher<geometry_msgs::msg::PoseArray>("landmarks", 1);
 	labelsPub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("labels", 1);
@@ -346,7 +363,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	}
 
 	// declare parameters
-	this->declare_parameter("is_rtabmap_paused", paused_);
+	paused_ = this->declare_parameter("is_rtabmap_paused", paused_);
 	if(paused_)
 	{
 		RCLCPP_WARN(get_logger(), "Node paused... don't forget to call service \"resume\" to start rtabmap.");
@@ -358,7 +375,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 		std::string vStr = this->declare_parameter(iter->first, iter->second);
 		if(overrides.find(iter->first) != overrides.end())
 		{
-			RCLCPP_INFO(this->get_logger(), "Setting RTAB-Map parameter \"%s\"=\"%s\"", iter->first.c_str(), vStr.c_str());
+			RCLCPP_INFO(this->get_logger(), "Setting RTAB-Map parameter \"%s\"=\"%s\" (rosparam)", iter->first.c_str(), vStr.c_str());
 
 			if(iter->first.compare(Parameters::kRtabmapWorkingDirectory()) == 0)
 			{
@@ -388,6 +405,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	
 	char ** argv = new char*[argList.size()];
 	bool deleteDbOnStart = false;
+	deleteDbOnStart = this->declare_parameter("delete_db_on_start", deleteDbOnStart);
 	for(unsigned int i=0; i<argList.size(); ++i)
 	{
 		argv[i] = &argList[i].at(0);
@@ -409,11 +427,12 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 		iter!=Parameters::getRemovedParameters().end();
 		++iter)
 	{
+		// Old names are never declared, so they can only be found among the overrides.
 		std::string paramValue;
-		rclcpp::Parameter parameter;
-		if(get_parameter(iter->first, parameter))
+		std::map<std::string, rclcpp::ParameterValue>::const_iterator oter = overrides.find(iter->first);
+		if(oter != overrides.end() && oter->second.get_type() == rclcpp::ParameterType::PARAMETER_STRING)
 		{
-			paramValue = parameter.as_string();
+			paramValue = oter->second.get<std::string>();
 		}
 		if(!paramValue.empty())
 		{
@@ -554,16 +573,13 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 			RCLCPP_INFO(this->get_logger(), "Create intermediate nodes");
 			if(rate_ == 0.0f)
 			{
-				bool interOdomInfo = false;
-				if(get_parameter("subscribe_inter_odom_info", interOdomInfo))
+				if(interOdomInfo)
 				{
 					RCLCPP_INFO(this->get_logger(), "Subscribe to inter odom + info messages");
 					interOdomSync_ = new message_filters::Synchronizer<MyExactInterOdomSyncPolicy>(MyExactInterOdomSyncPolicy(100), interOdomSyncSub_, interOdomInfoSyncSub_);
 					interOdomSync_->registerCallback(std::bind(&CoreWrapper::interOdomInfoCallback, this, std::placeholders::_1, std::placeholders::_2));
-					rmw_qos_profile_t qos = rmw_qos_profile_default;
-					qos.depth = 100;
-					interOdomSyncSub_.subscribe(this, "inter_odom", qos);
-					interOdomInfoSyncSub_.subscribe(this, "inter_odom_info", qos);
+					interOdomSyncSub_.subscribe(this, "inter_odom", RCLCPP_QOS(100, rclcpp::ReliabilityPolicy::SystemDefault));
+					interOdomInfoSyncSub_.subscribe(this, "inter_odom_info", RCLCPP_QOS(100, rclcpp::ReliabilityPolicy::SystemDefault));
 				}
 				else
 				{
@@ -657,45 +673,45 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 	// setup services
 	const std::string servicePrefix = get_name() + std::string("/");
-	updateSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "update_parameters", std::bind(&CoreWrapper::updateRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	resetSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "reset", std::bind(&CoreWrapper::resetRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	pauseSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "pause", std::bind(&CoreWrapper::pauseRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	resumeSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "resume", std::bind(&CoreWrapper::resumeRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	loadDatabaseSrv_ = this->create_service<rtabmap_msgs::srv::LoadDatabase>(servicePrefix + "load_database", std::bind(&CoreWrapper::loadDatabaseCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	triggerNewMapSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "trigger_new_map", std::bind(&CoreWrapper::triggerNewMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	backupDatabase_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "backup", std::bind(&CoreWrapper::backupDatabaseCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	detectMoreLoopClosuresSrv_ = this->create_service<rtabmap_msgs::srv::DetectMoreLoopClosures>(servicePrefix + "detect_more_loop_closures", std::bind(&CoreWrapper::detectMoreLoopClosuresCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	globalBundleAdjustmentSrv_ = this->create_service<rtabmap_msgs::srv::GlobalBundleAdjustment>(servicePrefix + "global_bundle_adjustment", std::bind(&CoreWrapper::globalBundleAdjustmentCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	cleanupLocalGridsSrv_ = this->create_service<rtabmap_msgs::srv::CleanupLocalGrids>(servicePrefix + "cleanup_local_grids", std::bind(&CoreWrapper::cleanupLocalGridsCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setModeLocalizationSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "set_mode_localization", std::bind(&CoreWrapper::setModeLocalizationCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setModeMappingSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "set_mode_mapping", std::bind(&CoreWrapper::setModeMappingCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getNodeDataSrv_ = this->create_service<rtabmap_msgs::srv::GetNodeData>(servicePrefix + "get_node_data", std::bind(&CoreWrapper::getNodeDataCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getMapDataSrv_ = this->create_service<rtabmap_msgs::srv::GetMap>(servicePrefix + "get_map_data", std::bind(&CoreWrapper::getMapDataCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getMapData2Srv_ = this->create_service<rtabmap_msgs::srv::GetMap2>(servicePrefix + "get_map_data2", std::bind(&CoreWrapper::getMapData2Callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getMapSrv_ = this->create_service<nav_msgs::srv::GetMap>(servicePrefix + "get_map", std::bind(&CoreWrapper::getMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getProbMapSrv_ = this->create_service<nav_msgs::srv::GetMap>(servicePrefix + "get_prob_map", std::bind(&CoreWrapper::getProbMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	publishMapDataSrv_ = this->create_service<rtabmap_msgs::srv::PublishMap>(servicePrefix + "publish_map", std::bind(&CoreWrapper::publishMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getPlanSrv_ = this->create_service<nav_msgs::srv::GetPlan>(servicePrefix + "get_plan", std::bind(&CoreWrapper::getPlanCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getPlanNodesSrv_ = this->create_service<rtabmap_msgs::srv::GetPlan>(servicePrefix + "get_plan_nodes", std::bind(&CoreWrapper::getPlanNodesCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setGoalSrv_ = this->create_service<rtabmap_msgs::srv::SetGoal>(servicePrefix + "set_goal", std::bind(&CoreWrapper::setGoalCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	cancelGoalSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "cancel_goal", std::bind(&CoreWrapper::cancelGoalCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setLabelSrv_ = this->create_service<rtabmap_msgs::srv::SetLabel>(servicePrefix + "set_label", std::bind(&CoreWrapper::setLabelCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	listLabelsSrv_ = this->create_service<rtabmap_msgs::srv::ListLabels>(servicePrefix + "list_labels", std::bind(&CoreWrapper::listLabelsCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	removeLabelSrv_ = this->create_service<rtabmap_msgs::srv::RemoveLabel>(servicePrefix + "remove_label", std::bind(&CoreWrapper::removeLabelCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	addLinkSrv_ = this->create_service<rtabmap_msgs::srv::AddLink>(servicePrefix + "add_link", std::bind(&CoreWrapper::addLinkCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	getNodesInRadiusSrv_ = this->create_service<rtabmap_msgs::srv::GetNodesInRadius>(servicePrefix + "get_nodes_in_radius", std::bind(&CoreWrapper::getNodesInRadiusCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
+	updateSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "update_parameters", std::bind(&CoreWrapper::updateRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	resetSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "reset", std::bind(&CoreWrapper::resetRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	pauseSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "pause", std::bind(&CoreWrapper::pauseRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	resumeSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "resume", std::bind(&CoreWrapper::resumeRtabmapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	loadDatabaseSrv_ = this->create_service<rtabmap_msgs::srv::LoadDatabase>(servicePrefix + "load_database", std::bind(&CoreWrapper::loadDatabaseCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	triggerNewMapSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "trigger_new_map", std::bind(&CoreWrapper::triggerNewMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	backupDatabase_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "backup", std::bind(&CoreWrapper::backupDatabaseCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	detectMoreLoopClosuresSrv_ = this->create_service<rtabmap_msgs::srv::DetectMoreLoopClosures>(servicePrefix + "detect_more_loop_closures", std::bind(&CoreWrapper::detectMoreLoopClosuresCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	globalBundleAdjustmentSrv_ = this->create_service<rtabmap_msgs::srv::GlobalBundleAdjustment>(servicePrefix + "global_bundle_adjustment", std::bind(&CoreWrapper::globalBundleAdjustmentCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	cleanupLocalGridsSrv_ = this->create_service<rtabmap_msgs::srv::CleanupLocalGrids>(servicePrefix + "cleanup_local_grids", std::bind(&CoreWrapper::cleanupLocalGridsCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setModeLocalizationSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "set_mode_localization", std::bind(&CoreWrapper::setModeLocalizationCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setModeMappingSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "set_mode_mapping", std::bind(&CoreWrapper::setModeMappingCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getNodeDataSrv_ = this->create_service<rtabmap_msgs::srv::GetNodeData>(servicePrefix + "get_node_data", std::bind(&CoreWrapper::getNodeDataCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getMapDataSrv_ = this->create_service<rtabmap_msgs::srv::GetMap>(servicePrefix + "get_map_data", std::bind(&CoreWrapper::getMapDataCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getMapData2Srv_ = this->create_service<rtabmap_msgs::srv::GetMap2>(servicePrefix + "get_map_data2", std::bind(&CoreWrapper::getMapData2Callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getMapSrv_ = this->create_service<nav_msgs::srv::GetMap>(servicePrefix + "get_map", std::bind(&CoreWrapper::getMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getProbMapSrv_ = this->create_service<nav_msgs::srv::GetMap>(servicePrefix + "get_prob_map", std::bind(&CoreWrapper::getProbMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	publishMapDataSrv_ = this->create_service<rtabmap_msgs::srv::PublishMap>(servicePrefix + "publish_map", std::bind(&CoreWrapper::publishMapCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getPlanSrv_ = this->create_service<nav_msgs::srv::GetPlan>(servicePrefix + "get_plan", std::bind(&CoreWrapper::getPlanCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getPlanNodesSrv_ = this->create_service<rtabmap_msgs::srv::GetPlan>(servicePrefix + "get_plan_nodes", std::bind(&CoreWrapper::getPlanNodesCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setGoalSrv_ = this->create_service<rtabmap_msgs::srv::SetGoal>(servicePrefix + "set_goal", std::bind(&CoreWrapper::setGoalCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	cancelGoalSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "cancel_goal", std::bind(&CoreWrapper::cancelGoalCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setLabelSrv_ = this->create_service<rtabmap_msgs::srv::SetLabel>(servicePrefix + "set_label", std::bind(&CoreWrapper::setLabelCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	listLabelsSrv_ = this->create_service<rtabmap_msgs::srv::ListLabels>(servicePrefix + "list_labels", std::bind(&CoreWrapper::listLabelsCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	removeLabelSrv_ = this->create_service<rtabmap_msgs::srv::RemoveLabel>(servicePrefix + "remove_label", std::bind(&CoreWrapper::removeLabelCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	addLinkSrv_ = this->create_service<rtabmap_msgs::srv::AddLink>(servicePrefix + "add_link", std::bind(&CoreWrapper::addLinkCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	getNodesInRadiusSrv_ = this->create_service<rtabmap_msgs::srv::GetNodesInRadius>(servicePrefix + "get_nodes_in_radius", std::bind(&CoreWrapper::getNodesInRadiusCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
 
 #ifdef WITH_OCTOMAP_MSGS
 #ifdef RTABMAP_OCTOMAP
-	octomapBinarySrv_ = this->create_service<octomap_msgs::srv::GetOctomap>(servicePrefix + "octomap_binary", std::bind(&CoreWrapper::octomapBinaryCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	octomapFullSrv_ = this->create_service<octomap_msgs::srv::GetOctomap>(servicePrefix + "octomap_full", std::bind(&CoreWrapper::octomapFullCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
+	octomapBinarySrv_ = this->create_service<octomap_msgs::srv::GetOctomap>(servicePrefix + "octomap_binary", std::bind(&CoreWrapper::octomapBinaryCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	octomapFullSrv_ = this->create_service<octomap_msgs::srv::GetOctomap>(servicePrefix + "octomap_full", std::bind(&CoreWrapper::octomapFullCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
 #endif
 #endif
 	//private services
-	setLogDebugSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_debug", std::bind(&CoreWrapper::setLogDebug, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setLogInfoSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_info", std::bind(&CoreWrapper::setLogInfo, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setLogWarnSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_warning", std::bind(&CoreWrapper::setLogWarn, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
-	setLogErrorSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_error", std::bind(&CoreWrapper::setLogError, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rmw_qos_profile_services_default, processingCallbackGroup_);
+	setLogDebugSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_debug", std::bind(&CoreWrapper::setLogDebug, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setLogInfoSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_info", std::bind(&CoreWrapper::setLogInfo, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setLogWarnSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_warning", std::bind(&CoreWrapper::setLogWarn, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
+	setLogErrorSrv_ = this->create_service<std_srvs::srv::Empty>(servicePrefix + "log_error", std::bind(&CoreWrapper::setLogError, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), rclcpp::ServicesQoS(), processingCallbackGroup_);
 
 	int optimizeIterations = 0;
 	Parameters::parse(parameters_, Parameters::kOptimizerIterations(), optimizeIterations);
@@ -711,16 +727,25 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 				mapToOdomMutex_.lock();
 				if(!odomFrameId_.empty())
 				{
-					rclcpp::Time tfExpiration = now() + rclcpp::Duration::from_seconds(tfTolerance);
 					geometry_msgs::msg::TransformStamped msg;
+					rtabmap_conversions::transformToGeometryMsg(mapToOdom_, msg.transform);
 					msg.child_frame_id = odomFrameId_;
 					msg.header.frame_id = mapFrameId_;
-					msg.header.stamp = tfExpiration;
-					rtabmap_conversions::transformToGeometryMsg(mapToOdom_, msg.transform);
+					msg.header.stamp = now() + rclcpp::Duration::from_seconds(tfTolerance);
 					tfBroadcaster_->sendTransform(msg);
 				}
 				mapToOdomMutex_.unlock();
-				r.sleep();
+				try {
+					r.sleep();
+				}
+				catch(std::exception & e) {
+					if(rclcpp::ok()) {
+						RCLCPP_ERROR(this->get_logger(),
+							"Could not sleep: \"%s\", TF \"%s\"->\"%s\" won't be published anymore!",
+							e.what(), mapFrameId_.c_str(), odomFrameId_.c_str());
+					} // else: the node may have been shutdown
+					break;
+				}
 			}
 		});
 	}
@@ -754,9 +779,14 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 					  Parameters::kRGBDEnabled().c_str(),
 					  Parameters::kRGBDEnabled().c_str());
 		}
-		image_transport::TransportHints hints(this);
-		defaultSub_ = image_transport::create_subscription(this, "image", std::bind(&CoreWrapper::defaultCallback, this, std::placeholders::_1), hints.getTransport(), rclcpp::QoS(this->getTopicQueueSize()).reliability((rmw_qos_reliability_policy_t)qosImage_).get_rmw_qos_profile(), subOptions);
-
+		std::string imageTopic = this->get_node_topics_interface()->resolve_topic_name("image"); // Humble/Jazzy don't resolve base topic, fixed by https://github.com/ros-perception/image_common/commit/ea7589ae8c1f7ecb83d6aab7b4c890c2d630d27a
+#ifdef PRE_ROS_LYRICAL
+		image_transport::TransportHints hints(this); // using "image_transport" parameter
+		defaultSub_ = image_transport::create_subscription(this, imageTopic, std::bind(&CoreWrapper::defaultCallback, this, std::placeholders::_1), hints.getTransport(), rclcpp::QoS(this->getTopicQueueSize()).reliability((rmw_qos_reliability_policy_t)qosImage_).get_rmw_qos_profile(), subOptions);
+#else
+		image_transport::TransportHints hints(*this); // using "image_transport" parameter
+		defaultSub_ = image_transport::create_subscription(*this, imageTopic, std::bind(&CoreWrapper::defaultCallback, this, std::placeholders::_1), hints.getTransport(), rclcpp::QoS(this->getTopicQueueSize()).reliability((rmw_qos_reliability_policy_t)qosImage_), subOptions);
+#endif
 
 		RCLCPP_INFO(this->get_logger(), "\n%s subscribed to:\n   %s", get_name(), defaultSub_.getTopic().c_str());
 	}
@@ -787,13 +817,14 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 			if(modifiedParameters.find(Parameters::kRGBDProximityPathMaxNeighbors()) == modifiedParameters.end())
 			{
-				if(this->isSubscribedToScan2d())
+				if(this->isSubscribedToScan2d() || (this->isSubscribedToScan3d() && scanCloudIs2d_))
 				{
-					RCLCPP_WARN(this->get_logger(), "Setting \"%s\" parameter to 10 (default 0) as \"subscribe_scan\" is "
+					RCLCPP_WARN(this->get_logger(), "Setting \"%s\" parameter to 10 (default 0) as \"%s\" is "
 							"true and \"%s\" uses ICP. Proximity detection by space will be also done by merging close "
 							"scans. To disable, set \"%s\" to 0. To suppress this warning, "
 							"add <param name=\"%s\" type=\"string\" value=\"10\"/>",
 							Parameters::kRGBDProximityPathMaxNeighbors().c_str(),
+							this->isSubscribedToScan2d()?"subscribe_scan":"scan_cloud_is_2d",
 							Parameters::kRegStrategy().c_str(),
 							Parameters::kRGBDProximityPathMaxNeighbors().c_str(),
 							Parameters::kRGBDProximityPathMaxNeighbors().c_str());
@@ -815,6 +846,14 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 		if(updateParams)
 		{
 			rtabmap_.parseParameters(parameters_);
+		}
+	}
+	
+	if(!this->isSubscribedToOdom() && odomFrameId_.empty())
+	{
+		bool isRGBD = uStr2Bool(parameters_.at(Parameters::kRGBDEnabled()).c_str());
+		if(isRGBD) {
+			RCLCPP_ERROR(this->get_logger(), "\"subscribe_odom\" or \"odom_frame_id\" should be used when \"%s\" is enabled!", Parameters::kRGBDEnabled().c_str());
 		}
 	}
 
@@ -843,34 +882,59 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 	// Setup callback groups for any subscriptions that should not be affected by main processing thread.
 	userDataAsyncCallbackGroup_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+	globalPoseAsyncCallbackGroup_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+	gpsAsyncCallbackGroup_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 	landmarkCallbackGroup_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 	imuCallbackGroup_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+	envSensorAsyncCallbackGroup_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 	rclcpp::SubscriptionOptions userDataAsyncSubOptions;
+	rclcpp::SubscriptionOptions globalPoseAsyncSubOptions;
+	rclcpp::SubscriptionOptions gpsAsyncSubOptions;
 	rclcpp::SubscriptionOptions landmarkSubOptions;
 	rclcpp::SubscriptionOptions imuSubOptions;
+	rclcpp::SubscriptionOptions envSensorAsyncSubOptions;
 	userDataAsyncSubOptions.callback_group = userDataAsyncCallbackGroup_;
+	globalPoseAsyncSubOptions.callback_group = globalPoseAsyncCallbackGroup_;
+	gpsAsyncSubOptions.callback_group = gpsAsyncCallbackGroup_;
 	landmarkSubOptions.callback_group = imuCallbackGroup_;
 	imuSubOptions.callback_group = imuCallbackGroup_;
+	envSensorAsyncSubOptions.callback_group = envSensorAsyncCallbackGroup_;
 
 	int qosGPS = RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
 	int qosIMU = RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
+	int qosEnvSensor = RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
 	qosGPS = this->declare_parameter("qos_gps", qosGPS);
 	qosIMU = this->declare_parameter("qos_imu", qosIMU);
+	qosEnvSensor = this->declare_parameter("qos_env_sensor", qosEnvSensor);
 	userDataAsyncSub_ = this->create_subscription<rtabmap_msgs::msg::UserData>("user_data_async", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qosUserData_), std::bind(&CoreWrapper::userDataAsyncCallback, this, std::placeholders::_1), userDataAsyncSubOptions);
-	globalPoseAsyncSub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>("global_pose", 1, std::bind(&CoreWrapper::globalPoseAsyncCallback, this, std::placeholders::_1), subOptions);
-	gpsFixAsyncSub_ = this->create_subscription<sensor_msgs::msg::NavSatFix>("gps/fix", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qosGPS), std::bind(&CoreWrapper::gpsFixAsyncCallback, this, std::placeholders::_1), subOptions);
+	globalPoseAsyncSub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>("global_pose", 1, std::bind(&CoreWrapper::globalPoseAsyncCallback, this, std::placeholders::_1), globalPoseAsyncSubOptions);
+	gpsFixAsyncSub_ = this->create_subscription<sensor_msgs::msg::NavSatFix>("gps/fix", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qosGPS), std::bind(&CoreWrapper::gpsFixAsyncCallback, this, std::placeholders::_1), gpsAsyncSubOptions);
+	envSensorAsyncSub_ = this->create_subscription<rtabmap_msgs::msg::EnvSensor>("env_sensor", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qosEnvSensor), std::bind(&CoreWrapper::envSensorAsyncCallback, this, std::placeholders::_1), envSensorAsyncSubOptions);
 	landmarkDetectionSub_ = this->create_subscription<rtabmap_msgs::msg::LandmarkDetection>("landmark_detection", 1, std::bind(&CoreWrapper::landmarkDetectionAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
 	landmarkDetectionsSub_ = this->create_subscription<rtabmap_msgs::msg::LandmarkDetections>("landmark_detections", 1, std::bind(&CoreWrapper::landmarkDetectionsAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
 #ifdef WITH_APRILTAG_MSGS
 	tagDetectionsSub_ = this->create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>("tag_detections", 5, std::bind(&CoreWrapper::tagDetectionsAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
+	apriltagSub_ = this->create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>("apriltag/detections", 5, std::bind(&CoreWrapper::apriltagAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
+#endif
+#ifdef WITH_ARUCO_MSGS
+	arucoSub_ = this->create_subscription<aruco_msgs::msg::MarkerArray>("aruco/detections", 5, std::bind(&CoreWrapper::arucoAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
+#endif
+#ifdef WITH_ARUCO_OPENCV_MSGS
+	arucoOpencvSub_ = this->create_subscription<aruco_opencv_msgs::msg::ArucoDetection>("aruco_opencv/detections", 5, std::bind(&CoreWrapper::arucoOpencvAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
+#endif
+#ifdef WITH_ARUCO_MARKERS_MSGS
+	arucoMarkersSub_ = this->create_subscription<aruco_markers_msgs::msg::MarkerArray>("aruco_markers/detections", 5, std::bind(&CoreWrapper::arucoMarkersAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
+#endif
+#ifdef WITH_ROS2_ARUCO_INTERFACES
+	arucoInterfacesSub_ = this->create_subscription<ros2_aruco_interfaces::msg::ArucoMarkers>("aruco_interfaces/detections", 5, std::bind(&CoreWrapper::arucoInterfacesAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
 #endif
 #ifdef WITH_FIDUCIAL_MSGS
 	fiducialTransfromsSub_ = this->create_subscription<fiducial_msgs::msg::FiducialTransformArray>("fiducial_transforms", 5, std::bind(&CoreWrapper::fiducialDetectionsAsyncCallback, this, std::placeholders::_1), landmarkSubOptions);
 #endif
 	imuSub_ = this->create_subscription<sensor_msgs::msg::Imu>("imu", rclcpp::QoS(100).reliability((rmw_qos_reliability_policy_t)qosIMU), std::bind(&CoreWrapper::imuAsyncCallback, this, std::placeholders::_1), imuSubOptions);
 	republishNodeDataSub_ = this->create_subscription<std_msgs::msg::Int32MultiArray>(servicePrefix+"republish_node_data", 1, std::bind(&CoreWrapper::republishNodeDataCallback, this, std::placeholders::_1), subOptions);
+	parametersClient_ = std::make_shared<rclcpp::AsyncParametersClient>(this, std::string(), rclcpp::ParametersQoS(), processingCallbackGroup_);
 
-	parametersClient_ = std::make_shared<rclcpp::AsyncParametersClient>(this, std::string(), rmw_qos_profile_parameters, processingCallbackGroup_);
 	auto on_parameter_event_callback =
 			[this](const rcl_interfaces::msg::ParameterEvent::SharedPtr event) -> void
 			{
@@ -914,14 +978,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 							parameters_.at(key) = vStr;
 						}
 					}
-					RCLCPP_INFO(this->get_logger(), "rtabmap: Updating parameters");
-					if(parameters_.find(Parameters::kRtabmapDetectionRate()) != parameters_.end())
-					{
-						rate_ = uStr2Float(parameters_.at(Parameters::kRtabmapDetectionRate()));
-						RCLCPP_INFO(this->get_logger(), "RTAB-Map rate detection = %f Hz", rate_);
-					}
-					rtabmap_.parseParameters(parameters_);
-					mapsManager_.setParameters(parameters_);
+					applyParameters();
 				}
 			};
 
@@ -946,19 +1003,28 @@ CoreWrapper::~CoreWrapper()
 	this->saveParameters(configPath_);
 
 	printf("rtabmap: Saving database/long-term memory... (located at %s)\n", databasePath_.c_str());
+	bool saveDatabase = true;
 	if(rtabmap_.getMemory())
 	{
-		// save the grid map
-		float xMin=0.0f, yMin=0.0f, gridCellSize = 0.05f;
-		cv::Mat pixels = mapsManager_.getGridMap(xMin, yMin, gridCellSize);
-		if(!pixels.empty())
+		if(!rtabmap_.getMemory()->isReadOnly())
 		{
-			printf("rtabmap: 2D occupancy grid map saved.\n");
-			rtabmap_.getMemory()->save2DMap(pixels, xMin, yMin, gridCellSize);
+			// save the grid map
+			float xMin=0.0f, yMin=0.0f, gridCellSize = 0.05f;
+			cv::Mat pixels = mapsManager_.getGridMap(xMin, yMin, gridCellSize);
+			if(!pixels.empty())
+			{
+				printf("rtabmap: 2D occupancy grid map saved.\n");
+				rtabmap_.getMemory()->save2DMap(pixels, xMin, yMin, gridCellSize);
+			}
+		}
+		else
+		{
+			printf("rtabmap: Database is read-only, the current state of the memory is not saved.\n");
+			saveDatabase = false;
 		}
 	}
 
-	rtabmap_.close();
+	rtabmap_.close(saveDatabase);
 	printf("rtabmap: Saving database/long-term memory...done! (located at %s, %ld MB)\n", databasePath_.c_str(), UFile::length(databasePath_)/(1024*1024));
 
 	delete interOdomSync_;
@@ -1101,6 +1167,26 @@ bool CoreWrapper::odomUpdate(const nav_msgs::msg::Odometry & odomMsg, rclcpp::Ti
 			UWARN("Odometry is reset (identity pose or high variance (%f) detected). Increment map id!", MAX(odomMsg.pose.covariance[0], odomMsg.twist.covariance[0]));
 			triggerNewMapBeforeNextUpdate_ = true;
 			lastPoseCovariance_ = cv::Mat();
+		} 
+		else if(stalenessFactor_>0.0 && 
+			    previousStamp_.seconds() > 0.0 && 
+				rate_>0.0f && 
+				(stamp - previousStamp_).seconds() > stalenessFactor_/rate_)
+		{
+			UWARN("The time difference (%f s) between the new timestamp received (%f) and "
+				"the previous one (%f) is way over than the expected update period (%s=%f Hz) "
+				"%f x staleness_factor (%f) = %f s. Triggering a new map! Set staleness_factor to 0 "
+				"to avoid triggering a new map when this happens.",
+				(stamp - previousStamp_).seconds(),
+				stamp.seconds(),
+				previousStamp_.seconds(),
+				Parameters::kRtabmapDetectionRate().c_str(),
+				rate_,
+				1.0f/rate_,
+				stalenessFactor_,
+				stalenessFactor_/rate_);
+			triggerNewMapBeforeNextUpdate_ = true;
+			lastPoseCovariance_ = cv::Mat();
 		}
 
 		lastPoseIntermediate_ = false;
@@ -1192,6 +1278,26 @@ bool CoreWrapper::odomTFUpdate(const std::string & odomFrameId, const rclcpp::Ti
 			triggerNewMapBeforeNextUpdate_ = true;
 			lastPoseCovariance_ = cv::Mat();
 		}
+		else if(stalenessFactor_>0.0 && 
+			    previousStamp_.seconds() > 0.0 && 
+				rate_>0.0f && 
+				(stamp - previousStamp_).seconds() > stalenessFactor_/rate_)
+		{
+			UWARN("The time difference (%f s) between the new timestamp received (%f) and "
+				"the previous one (%f) is way over than the expected update period (%s=%f Hz) "
+				"%f x staleness_factor (%f) = %f s. Triggering a new map! Set staleness_factor to 0 "
+				"to avoid triggering a new map when this happens.",
+				(stamp - previousStamp_).seconds(),
+				stamp.seconds(),
+				previousStamp_.seconds(),
+				Parameters::kRtabmapDetectionRate().c_str(),
+				rate_,
+				1.0f/rate_,
+				stalenessFactor_,
+				stalenessFactor_/rate_);
+			triggerNewMapBeforeNextUpdate_ = true;
+			lastPoseCovariance_ = cv::Mat();
+		}
 
 		lastPoseIntermediate_ = false;
 		lastPose_ = odom;
@@ -1271,6 +1377,11 @@ void CoreWrapper::commonMultiCameraCallback(
 		mapToOdomMutex_.lock();
 		odomFrameId = odomFrameId_;
 		mapToOdomMutex_.unlock();
+		if(odomFrameId.empty())
+		{
+			RCLCPP_ERROR(this->get_logger(), "This callback cannot be used without \"subscribe_odom\" or \"odom_frame_id\" set.");
+			return;
+		}
 		if(!scan2dMsg.ranges.empty())
 		{
 			if(!odomTFUpdate(odomFrameId, scan2dMsg.header.stamp))
@@ -1291,7 +1402,8 @@ void CoreWrapper::commonMultiCameraCallback(
 		}
 	}
 
-	if(syncTimer_->is_canceled() && syncDataMutex_.lockTry() == 0)
+	UScopeMutex syncDataLock(syncDataMutex_, false);
+	if(syncTimer_->is_canceled() && syncDataLock.lockTry() == 0)
 	{
 		UScopeMutex lock(lastPoseMutex_);
 		commonMultiCameraCallbackImpl(odomFrameId,
@@ -1311,7 +1423,6 @@ void CoreWrapper::commonMultiCameraCallback(
 		if(syncData_.valid) {
 			syncTimer_->reset();
 		}
-		syncDataMutex_.unlock();
 	}
 }
 
@@ -1657,6 +1768,11 @@ void CoreWrapper::commonLaserScanCallback(
 		mapToOdomMutex_.lock();
 		odomFrameId = odomFrameId_;
 		mapToOdomMutex_.unlock();
+		if(odomFrameId.empty())
+		{
+			RCLCPP_ERROR(this->get_logger(), "This callback cannot be used without \"subscribe_odom\" or \"odom_frame_id\" set.");
+			return;
+		}
 		if(!scan2dMsg.ranges.empty())
 		{
 			if(!odomTFUpdate(odomFrameId, scan2dMsg.header.stamp))
@@ -1677,7 +1793,8 @@ void CoreWrapper::commonLaserScanCallback(
 		}
 	}
 
-	if(syncTimer_->is_canceled() && syncDataMutex_.lockTry() == 0)
+	UScopeMutex syncDataLock(syncDataMutex_, false);
+	if(syncTimer_->is_canceled() && syncDataLock.lockTry() == 0)
 	{
 		UScopeMutex lock(lastPoseMutex_);
 		LaserScan scan;
@@ -1772,7 +1889,6 @@ void CoreWrapper::commonLaserScanCallback(
 		lastPoseCovariance_ = cv::Mat();
 
 		syncTimer_->reset();
-		syncDataMutex_.unlock();
 	}
 }
 
@@ -1789,7 +1905,8 @@ void CoreWrapper::commonOdomCallback(
 		return;
 	}
 
-	if(syncTimer_->is_canceled() && syncDataMutex_.lockTry() == 0)
+	UScopeMutex syncDataLock(syncDataMutex_, false);
+	if(syncTimer_->is_canceled() && syncDataLock.lockTry() == 0)
 	{
 		UScopeMutex lock(lastPoseMutex_);
 		cv::Mat userData;
@@ -1841,7 +1958,6 @@ void CoreWrapper::commonOdomCallback(
 		lastPoseCovariance_ = cv::Mat();
 
 		syncTimer_->reset();
-		syncDataMutex_.unlock();
 	}
 }
 
@@ -1866,17 +1982,39 @@ void CoreWrapper::commonSensorDataCallback(
 		mapToOdomMutex_.lock();
 		odomFrameId = odomFrameId_;
 		mapToOdomMutex_.unlock();
+		if(odomFrameId.empty())
+		{
+			RCLCPP_ERROR(this->get_logger(), "This callback cannot be used without \"subscribe_odom\" or \"odom_frame_id\" set.");
+			return;
+		}
 		if(!odomTFUpdate(odomFrameId, sensorDataMsg->header.stamp))
 		{
 			return;
 		}
 	}
 
-	if(syncTimer_->is_canceled() && syncDataMutex_.lockTry() == 0)
+	UScopeMutex syncDataLock(syncDataMutex_, false);
+	if(syncTimer_->is_canceled() && syncDataLock.lockTry() == 0)
 	{
 		UScopeMutex lock(lastPoseMutex_);
 		syncData_.data = rtabmap_conversions::sensorDataFromROS(*sensorDataMsg);
 		syncData_.data.setId(lastPoseIntermediate_?-1:0);
+
+		{
+			UScopeMutex lock(userDataMutex_);
+			if(!userData_.empty())
+			{
+				if(!syncData_.data.userDataRaw().empty() || !syncData_.data.userDataCompressed().empty())
+				{
+					RCLCPP_WARN(this->get_logger(), "Sensor data received already contains user data. Async user data dropped!");
+				}
+				else
+				{
+					syncData_.data.setUserData(userData_);
+				}
+				userData_ = cv::Mat();
+			}
+		}
 
 		OdometryInfo odomInfo;
 		if(odomInfoMsg.get())
@@ -1901,7 +2039,6 @@ void CoreWrapper::commonSensorDataCallback(
 		lastPoseCovariance_ = cv::Mat();
 
 		syncTimer_->reset();
-		syncDataMutex_.unlock();
 	}
 }
 
@@ -1946,7 +2083,7 @@ void CoreWrapper::process(
 		// Add intermediate nodes?
 		for(std::list<std::pair<nav_msgs::msg::Odometry, rtabmap_msgs::msg::OdomInfo> >::iterator iter=interOdoms_.begin(); iter!=interOdoms_.end();)
 		{
-			if(rclcpp::Time(iter->first.header.stamp.sec, iter->first.header.stamp.nanosec) < stamp)
+			if(rclcpp::Time(iter->first.header.stamp) < stamp)
 			{
 				Transform interOdom;
 				if(!rtabmap_.getLocalOptimizedPoses().empty())
@@ -2055,26 +2192,48 @@ void CoreWrapper::process(
 		data.setGroundTruth(groundTruthPose);
 
 		//global pose
-		if(globalPose_.header.stamp.sec != 0 || globalPose_.header.stamp.nanosec != 0)
+		geometry_msgs::msg::PoseWithCovarianceStamped globalPoseMsg;
+		globalPoseMsg.header.stamp = rclcpp::Time(0);
+		{
+			UScopeMutex lock(globalPoseMutex_);
+			if(!globalPoses_.empty())
+			{
+				auto iter = rtabmap_conversions::getClosestIterator<double, geometry_msgs::msg::PoseWithCovarianceStamped>(globalPoses_, data.stamp());
+				// Check if it is not too old
+				if(rate_ == 0 || fabs(iter->first - data.stamp()) < 1.0/rate_)
+				{
+					globalPoseMsg = iter->second;
+				}
+				else
+				{
+					RCLCPP_WARN(this->get_logger(), "Ignoring global pose with stamp %f because it should be inside the update period (%f) of the current data stamp (%f).",
+						iter->first,
+						1.0/rate_,
+						data.stamp());
+				}
+				globalPoses_.clear();
+			}
+		}
+		if(globalPoseMsg.header.stamp.sec != 0 || globalPoseMsg.header.stamp.nanosec != 0)
 		{
 			// assume sensor is fixed
 			Transform sensorToBase = rtabmap_conversions::getTransform(
-					globalPose_.header.frame_id,
+					globalPoseMsg.header.frame_id,
 					frameId_,
 					stamp,
 					*tfBuffer_,
 					waitForTransform_);
 			if(!sensorToBase.isNull())
 			{
-				Transform globalPose = rtabmap_conversions::transformFromPoseMsg(globalPose_.pose.pose);
+				Transform globalPose = rtabmap_conversions::transformFromPoseMsg(globalPoseMsg.pose.pose);
 				globalPose *= sensorToBase; // transform global pose from sensor frame to robot base frame
 
 				// Correction of the global pose accounting the odometry movement since we received it
 				Transform correction = rtabmap_conversions::getMovingTransform(
 						frameId_,
 						odomFrameId,
+						rclcpp::Time(globalPoseMsg.header.stamp.sec, globalPoseMsg.header.stamp.nanosec),
 						stamp,
-						rclcpp::Time(globalPose_.header.stamp.sec, globalPose_.header.stamp.nanosec),
 						*tfBuffer_,
 						waitForTransform_);
 				if(!correction.isNull())
@@ -2087,17 +2246,32 @@ void CoreWrapper::process(
 							"If odometry is small since it received the global pose and "
 							"covariance is large, this should not be a problem.");
 				}
-				cv::Mat globalPoseCovariance = cv::Mat(6,6, CV_64FC1, (void*)globalPose_.pose.covariance.data()).clone();
+				cv::Mat globalPoseCovariance = cv::Mat(6,6, CV_64FC1, (void*)globalPoseMsg.pose.covariance.data()).clone();
 				data.setGlobalPose(globalPose, globalPoseCovariance);
 			}
 		}
-		globalPose_.header.stamp = rclcpp::Time(0);
 
-		if(gps_.stamp() > 0.0)
 		{
-			data.setGPS(gps_);
+			UScopeMutex lock(gpsMutex_);
+			if(!gps_.empty())
+			{
+				std::map<double, rtabmap::GPS>::const_iterator iter = rtabmap_conversions::getClosestIterator<double, rtabmap::GPS>(gps_, data.stamp());
+				// Check if it is not too old
+				if(rate_ == 0 || fabs(iter->first - data.stamp()) < 1.0/rate_)
+				{
+					data.setGPS(iter->second);
+				}
+				else
+				{
+					RCLCPP_WARN(this->get_logger(), "Ignoring GPS with stamp %f because it should be inside the update period (%f) of the current data stamp (%f).",
+						iter->first,
+						1.0/rate_,
+						data.stamp());
+				}
+				gps_.clear();
+			}
 		}
-		gps_ = rtabmap::GPS();
+		
 
 		//tag detections
 		landmarksMutex_.lock();
@@ -2115,6 +2289,16 @@ void CoreWrapper::process(
 		if(!landmarks.empty())
 		{
 			data.setLandmarks(landmarks);
+		}
+
+		// Env sensors
+		{
+			UScopeMutex lock(envSensorMutex_);
+			if(!envSensors_.empty())
+			{
+				data.setEnvSensors(envSensors_);
+				envSensors_.clear();
+			}
 		}
 
 		// IMU
@@ -2277,8 +2461,8 @@ void CoreWrapper::process(
 				if(rtabmap_.getMemory() == 0 ||
 					filteredPoses.size() == 0 ||
 					rtabmap_.getMemory()->getLastSignatureId() != filteredPoses.rbegin()->first ||
-					rtabmap_.getMemory()->getLastWorkingSignature() == 0 ||
-					rtabmap_.getMemory()->getLastWorkingSignature()->sensorData().gridCellSize() == 0 ||
+					rtabmap_.getMemory()->getLastWorkingSignature(false) == 0 ||
+					rtabmap_.getMemory()->getLastWorkingSignature(false)->sensorData().gridCellSize() == 0 ||
 					(!mapsManager_.getLocalMapMaker()->isGridFromDepth() && data.laserScanRaw().is2d())) // 2d laser scan would fill empty space for latest data
 				{
 					SensorData tmpData = data;
@@ -2516,7 +2700,12 @@ void CoreWrapper::globalPoseAsyncCallback(const geometry_msgs::msg::PoseWithCova
 {
 	if(!paused_)
 	{
-		globalPose_ = *globalPoseMsg;
+		UScopeMutex lock(globalPoseMutex_);
+		globalPoses_.insert(std::make_pair(rtabmap_conversions::timestampFromROS(globalPoseMsg->header.stamp), *globalPoseMsg));
+		if(globalPoses_.size() > 1000)
+		{
+			globalPoses_.erase(globalPoses_.begin());
+		}
 	}
 }
 
@@ -2533,13 +2722,32 @@ void CoreWrapper::gpsFixAsyncCallback(const sensor_msgs::msg::NavSatFix::SharedP
 				error = sqrt(variance);
 			}
 		}
-		gps_ = rtabmap::GPS(
-				rtabmap_conversions::timestampFromROS(gpsFixMsg->header.stamp),
-				gpsFixMsg->longitude,
-				gpsFixMsg->latitude,
-				gpsFixMsg->altitude,
-				error,
-				0);
+
+		rtabmap::GPS gps(
+			rtabmap_conversions::timestampFromROS(gpsFixMsg->header.stamp),
+			gpsFixMsg->longitude,
+			gpsFixMsg->latitude,
+			gpsFixMsg->altitude,
+			error,
+			0);
+
+		UScopeMutex lock(gpsMutex_);
+		gps_.insert(std::make_pair(gps.stamp(), gps));
+		if(gps_.size() > 1000)
+		{
+			gps_.erase(gps_.begin());
+		}
+	}
+}
+
+void CoreWrapper::envSensorAsyncCallback(const rtabmap_msgs::msg::EnvSensor::SharedPtr envSensorMsg)
+{
+	if(!paused_)
+	{
+		// Can only insert one value for each type per node, keep the most recent
+		EnvSensor value = rtabmap_conversions::envSensorFromROS(*envSensorMsg);
+		UScopeMutex lock(envSensorMutex_);
+		uInsert(envSensors_, std::make_pair(value.type(), value));
 	}
 }
 
@@ -2575,18 +2783,30 @@ void CoreWrapper::landmarkDetectionsAsyncCallback(const rtabmap_msgs::msg::Landm
 }
 
 #ifdef WITH_APRILTAG_MSGS
-void CoreWrapper::tagDetectionsAsyncCallback(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr tagDetections)
+void CoreWrapper::tagDetectionsAsyncCallback(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr msg)
+{
+	if(!paused_)
+	{
+		static bool warningShow = false;
+		if(!warningShow) {
+			RCLCPP_WARN(this->get_logger(), "\"tag_detections\" input topic name for apriltag_msgs is deprecated, remap \"apriltag\" input topic name instead. This message is only printed once.");
+			warningShow = true;
+		}
+		apriltagAsyncCallback(msg);
+	}
+}
+void CoreWrapper::apriltagAsyncCallback(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr msg)
 {
 	if(!paused_)
 	{
 		UScopeMutex lock(landmarksMutex_);
-		for(unsigned int i=0; i<tagDetections->detections.size(); ++i)
+		for(unsigned int i=0; i<msg->detections.size(); ++i)
 		{
-			std::string tagFrameId = tagDetections->detections[i].family+":"+uNumber2Str(tagDetections->detections[i].id);
+			std::string tagFrameId = msg->detections[i].family+":"+uNumber2Str(msg->detections[i].id);
 			Transform camToTag = rtabmap_conversions::getTransform(
-				tagDetections->header.frame_id, // e.g., camera_optical_frame
+				msg->header.frame_id, // e.g., camera_optical_frame
 				tagFrameId,                     // e.g., tag36h11:42
-				tagDetections->header.stamp,
+				msg->header.stamp,
 				*tfBuffer_,
 				waitForTransform_);
 			if(camToTag.isNull())
@@ -2594,16 +2814,97 @@ void CoreWrapper::tagDetectionsAsyncCallback(const apriltag_msgs::msg::AprilTagD
 				RCLCPP_WARN(get_logger(), "Could not get TF between %s and %s frames for tag detection %d.",
 					frameId_.c_str(),
 					tagFrameId.c_str(),
-					tagDetections->detections[i].id);
+					msg->detections[i].id);
 					continue;
 			}
 
 			geometry_msgs::msg::PoseWithCovarianceStamped p;
 			rtabmap_conversions::transformToPoseMsg(camToTag, p.pose.pose);
-			p.header = tagDetections->header;
+			p.header = msg->header;
 			
 			uInsert(landmarks_,
-					std::make_pair(tagDetections->detections[i].id,
+					std::make_pair(msg->detections[i].id,
+							std::make_pair(p, 0.0f)));
+		}
+	}
+}
+#endif
+
+#ifdef WITH_ARUCO_MSGS
+void CoreWrapper::arucoAsyncCallback(const aruco_msgs::msg::MarkerArray::SharedPtr msg)
+{
+	if(!paused_)
+	{
+		UScopeMutex lock(landmarksMutex_);
+		for(unsigned int i=0; i<msg->markers.size(); ++i)
+		{
+			geometry_msgs::msg::PoseWithCovarianceStamped p;
+			p.pose = msg->markers[i].pose;
+			p.header = msg->markers[i].header;
+
+			uInsert(landmarks_,
+					std::make_pair((int)msg->markers[i].id,
+							std::make_pair(p, 0.0f)));
+		}
+	}
+}
+#endif
+
+#ifdef WITH_ARUCO_OPENCV_MSGS
+void CoreWrapper::arucoOpencvAsyncCallback(const aruco_opencv_msgs::msg::ArucoDetection::SharedPtr msg)
+{
+	if(!paused_)
+	{
+		UScopeMutex lock(landmarksMutex_);
+		for(unsigned int i=0; i<msg->markers.size(); ++i)
+		{
+			geometry_msgs::msg::PoseWithCovarianceStamped p;
+			p.pose.pose = msg->markers[i].pose;
+			p.header = msg->header;
+			
+			uInsert(landmarks_,
+					std::make_pair((int)msg->markers[i].marker_id,
+							std::make_pair(p, 0.0f)));
+		}
+	}
+}
+#endif
+
+#ifdef WITH_ARUCO_MARKERS_MSGS
+void CoreWrapper::arucoMarkersAsyncCallback(const aruco_markers_msgs::msg::MarkerArray::SharedPtr msg)
+{
+	if(!paused_)
+	{
+		UScopeMutex lock(landmarksMutex_);
+		for(unsigned int i=0; i<msg->markers.size(); ++i)
+		{
+			geometry_msgs::msg::PoseWithCovarianceStamped p;
+			p.pose.pose = msg->markers[i].pose.pose;
+			p.header = msg->markers[i].pose.header;
+			
+			uInsert(landmarks_,
+					std::make_pair((int)msg->markers[i].id,
+							std::make_pair(p, 0.0f)));
+		}
+	}
+}
+#endif
+
+#ifdef WITH_ROS2_ARUCO_INTERFACES
+void CoreWrapper::arucoInterfacesAsyncCallback(const ros2_aruco_interfaces::msg::ArucoMarkers::SharedPtr msg)
+{
+	if(!paused_)
+	{
+		UScopeMutex lock(landmarksMutex_);
+		UASSERT(msg->marker_ids.size() == msg->poses.size());
+		for(unsigned int i=0; i<msg->marker_ids.size(); ++i)
+		{
+			geometry_msgs::msg::PoseWithCovarianceStamped p;
+			p.pose.pose = msg->poses[i];
+			p.header = msg->header;
+			
+			uInsert(landmarks_,
+					std::make_pair((int)msg->marker_ids[i],
 							std::make_pair(p, 0.0f)));
 		}
 	}
@@ -2692,14 +2993,41 @@ void CoreWrapper::interOdomInfoCallback(const nav_msgs::msg::Odometry::ConstShar
 
 void CoreWrapper::initialPoseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
 {
-	Transform intialPose = rtabmap_conversions::transformFromPoseMsg(msg->pose.pose);
-	if(intialPose.isNull())
+	Transform mapToPose = Transform::getIdentity();
+	if(msg->header.frame_id.empty())
 	{
-		RCLCPP_ERROR(this->get_logger(), "Pose received is null!");
-		return;
+		RCLCPP_WARN(this->get_logger(), "Received initialpose doesn't have frame_id set, assuming it is in %s frame.", mapFrameId_.c_str());
+	}
+	else if(msg->header.frame_id != mapFrameId_)
+	{
+		mapToPose = rtabmap_conversions::getTransform(mapFrameId_, msg->header.frame_id, msg->header.stamp, *tfBuffer_, waitForTransform_);
+		if(mapToPose.isNull())
+		{
+			RCLCPP_ERROR(this->get_logger(), "Failed to transform initialpose from frame %s to map frame %s", msg->header.frame_id.c_str(), mapFrameId_.c_str());
+			return;
+		}
 	}
 
-	rtabmap_.setInitialPose(intialPose);
+	Transform initialPose = rtabmap_conversions::transformFromPoseMsg(msg->pose.pose);
+	if(initialPose.isNull())
+	{
+		RCLCPP_ERROR(this->get_logger(), "initialpose received is null!");
+		return;
+	}
+	if(mapToPose.isIdentity())
+	{
+		RCLCPP_INFO(this->get_logger(), "initialpose received: %s", initialPose.prettyPrint().c_str());
+		rtabmap_.setInitialPose(initialPose);
+	}
+	else
+	{
+		RCLCPP_INFO(this->get_logger(), "initialpose received: %s in %s frame, transformed to %s in %s frame.",
+			initialPose.prettyPrint().c_str(),
+			msg->header.frame_id.c_str(),
+			(mapToPose * initialPose).prettyPrint().c_str(),
+			mapFrameId_.c_str());
+		rtabmap_.setInitialPose(mapToPose*initialPose);
+	}
 }
 
 void CoreWrapper::goalCommonCallback(
@@ -2911,6 +3239,11 @@ void CoreWrapper::updateRtabmapCallback(
 			}
 		}
 	}
+	applyParameters();
+}
+
+void CoreWrapper::applyParameters()
+{
 	RCLCPP_INFO(get_logger(), "rtabmap: Updating parameters");
 	if(parameters_.find(Parameters::kRtabmapDetectionRate()) != parameters_.end())
 	{
@@ -2943,7 +3276,10 @@ void CoreWrapper::updateRtabmapCallback(
 		RCLCPP_INFO(get_logger(), "2D mapping = %s", twoDMapping_?"true":"false");
 	}
 	rtabmap_.parseParameters(parameters_);
-	mapsManager_.setParameters(parameters_);
+	// Don't reset map in localization mode
+	if(rtabmap_.getMemory()->isIncremental()) {
+		mapsManager_.setParameters(parameters_);
+	}
 }
 
 void CoreWrapper::resetRtabmapCallback(
@@ -2969,14 +3305,17 @@ void CoreWrapper::resetRtabmapCallback(
 	graphLatched_ = false;
 	mapsManager_.clear();
 	previousStamp_ = rclcpp::Time(0);
-	globalPose_.header.stamp = rclcpp::Time(0);
-	gps_ = rtabmap::GPS();
+	globalPoses_.clear();
+	gps_.clear();
 	landmarksMutex_.lock();
 	landmarks_.clear();
 	landmarksMutex_.unlock();
 	userDataMutex_.lock();
 	userData_ = cv::Mat();
 	userDataMutex_.unlock();
+	envSensorMutex_.lock();
+	envSensors_.clear();
+	envSensorMutex_.unlock();
 	imuMutex_.lock();
 	imus_.clear();
 	imuFrameId_.clear();
@@ -3042,18 +3381,27 @@ void CoreWrapper::loadDatabaseCallback(
 
 	// Close old database
 	RCLCPP_INFO(get_logger(), "LoadDatabase: Saving current map (%s)...", databasePath_.c_str());
+	bool saveDatabase = true;
 	if(rtabmap_.getMemory())
 	{
-		// save the grid map
-		float xMin=0.0f, yMin=0.0f, gridCellSize = 0.05f;
-		cv::Mat pixels = mapsManager_.getGridMap(xMin, yMin, gridCellSize);
-		if(!pixels.empty())
+		if(!rtabmap_.getMemory()->isReadOnly())
 		{
-			printf("rtabmap: 2D occupancy grid map saved.\n");
-			rtabmap_.getMemory()->save2DMap(pixels, xMin, yMin, gridCellSize);
+			// save the grid map
+			float xMin=0.0f, yMin=0.0f, gridCellSize = 0.05f;
+			cv::Mat pixels = mapsManager_.getGridMap(xMin, yMin, gridCellSize);
+			if(!pixels.empty())
+			{
+				printf("rtabmap: 2D occupancy grid map saved.\n");
+				rtabmap_.getMemory()->save2DMap(pixels, xMin, yMin, gridCellSize);
+			}
+		}
+		else
+		{
+			printf("rtabmap: Database is read-only, the current state of the memory is not saved.\n");
+			saveDatabase = false;
 		}
 	}
-	rtabmap_.close();
+	rtabmap_.close(saveDatabase);
 	RCLCPP_INFO(get_logger(), "LoadDatabase: Saving current map (%s, %ld MB)... done!", databasePath_.c_str(), UFile::length(databasePath_)/(1024*1024));
 
 	lastPoseMutex_.lock();
@@ -3071,14 +3419,17 @@ void CoreWrapper::loadDatabaseCallback(
 	graphLatched_ = false;
 	mapsManager_.clear();
 	previousStamp_ = rclcpp::Time(0);
-	globalPose_.header.stamp = rclcpp::Time(0);
-	gps_ = rtabmap::GPS();
+	globalPoses_.clear();
+	gps_.clear();
 	landmarksMutex_.lock();
 	landmarks_.clear();
 	landmarksMutex_.unlock();
 	userDataMutex_.lock();
 	userData_ = cv::Mat();
 	userDataMutex_.unlock();
+	envSensorMutex_.lock();
+	envSensors_.clear();
+	envSensorMutex_.unlock();
 	imuMutex_.lock();
 	imus_.clear();
 	imuFrameId_.clear();
@@ -3091,14 +3442,16 @@ void CoreWrapper::loadDatabaseCallback(
 	// Open new database
 	databasePath_ = newDatabasePath;
 
-	// modify default parameters with those in the database
+	//Warn if database's parameters are different than the current ones we are using
 	if(!req->clear && UFile::exists(databasePath_))
 	{
 		ParametersMap dbParameters;
 		rtabmap::DBDriver * driver = rtabmap::DBDriver::create();
+		std::string databaseVersion = "0.0.0";
 		if(driver->openConnection(databasePath_))
 		{
 			dbParameters = driver->getLastParameters(); // parameter migration is already done
+			databaseVersion = driver->getDatabaseVersion();
 		}
 		delete driver;
 		for(ParametersMap::iterator iter=dbParameters.begin(); iter!=dbParameters.end(); ++iter)
@@ -3108,15 +3461,31 @@ void CoreWrapper::loadDatabaseCallback(
 				// ignore working directory
 				continue;
 			}
-			if(parameters_.find(iter->first) == parameters_.end() &&
-				parameters_.find(iter->first)->second.compare(iter->second) !=0)
+			if(iter->first.find("Odom") == 0)
 			{
-				RCLCPP_WARN(get_logger(), "RTAB-Map parameter \"%s\" from database (%s) is different "
-						"from the current used one (%s). We still keep the "
+				// ignore odometry params
+				continue;
+			}
+			if(parameters_.find(iter->first) == parameters_.end())
+			{
+				RCLCPP_WARN(get_logger(), "RTAB-Map parameter \"%s\" from database (%s, version \"%s\") doesn't exist "
+						"in current rtabmap version (\"%s\"). The parameter is ignored.",
+						iter->first.c_str(),
+						iter->second.c_str(),
+						databaseVersion.c_str(),
+						RTABMAP_VERSION);
+			}
+			else if(parameters_.find(iter->first)->second.compare(iter->second) !=0)
+			{
+				RCLCPP_WARN(get_logger(), "RTAB-Map parameter \"%s\" from database (%s, version=\"%s\") is different "
+						"from the current used one (%s, version=\"%s\"). We still keep the "
 						"current parameter value (%s). If you want to switch between databases "
 						"with different configurations, restart rtabmap node instead of using this service.",
-						iter->first.c_str(), iter->second.c_str(),
+						iter->first.c_str(),
+						iter->second.c_str(),
+						databaseVersion.c_str(),
 						parameters_.find(iter->first)->second.c_str(),
+						RTABMAP_VERSION,
 						parameters_.find(iter->first)->second.c_str());
 			}
 		}
@@ -3177,18 +3546,27 @@ void CoreWrapper::backupDatabaseCallback(
 		std::shared_ptr<std_srvs::srv::Empty::Response>)
 {
 	RCLCPP_INFO(this->get_logger(), "Backup: Saving memory...");
+	bool saveDatabase = true;
 	if(rtabmap_.getMemory())
 	{
-		// save the grid map
-		float xMin=0.0f, yMin=0.0f, gridCellSize = 0.05f;
-		cv::Mat pixels = mapsManager_.getGridMap(xMin, yMin, gridCellSize);
-		if(!pixels.empty())
+		if(!rtabmap_.getMemory()->isReadOnly())
 		{
-			printf("rtabmap: 2D occupancy grid map saved.\n");
-			rtabmap_.getMemory()->save2DMap(pixels, xMin, yMin, gridCellSize);
+			// save the grid map
+			float xMin=0.0f, yMin=0.0f, gridCellSize = 0.05f;
+			cv::Mat pixels = mapsManager_.getGridMap(xMin, yMin, gridCellSize);
+			if(!pixels.empty())
+			{
+				printf("rtabmap: 2D occupancy grid map saved.\n");
+				rtabmap_.getMemory()->save2DMap(pixels, xMin, yMin, gridCellSize);
+			}
+		}
+		else
+		{
+			printf("rtabmap: Database is read-only, the current state of the memory is not saved.\n");
+			saveDatabase = false;
 		}
 	}
-	rtabmap_.close();
+	rtabmap_.close(saveDatabase);
 	RCLCPP_INFO(this->get_logger(), "Backup: Saving memory... done!");
 
 	lastPoseMutex_.lock();
@@ -3207,8 +3585,11 @@ void CoreWrapper::backupDatabaseCallback(
 	userDataMutex_.lock();
 	userData_ = cv::Mat();
 	userDataMutex_.unlock();
-	globalPose_.header.stamp = rclcpp::Time(0);
-	gps_ = rtabmap::GPS();
+	globalPoses_.clear();
+	gps_.clear();
+	envSensorMutex_.lock();
+	envSensors_.clear();
+	envSensorMutex_.unlock();
 	landmarksMutex_.lock();
 	landmarks_.clear();
 	landmarksMutex_.unlock();
@@ -3387,10 +3768,10 @@ void CoreWrapper::globalBundleAdjustmentCallback(
 	UTimer timer;
 	int optimizer = (int)Optimizer::kTypeG2O; // g2o
 	int iterations = Parameters::defaultOptimizerIterations();
-	float pixelVariance = Parameters::defaultg2oPixelVariance();
+	float pixelVariance = Parameters::defaultOptimizerPixelVariance();
 	bool rematchFeatures = true;
 	Parameters::parse(parameters_, Parameters::kOptimizerIterations(), iterations);
-	Parameters::parse(parameters_, Parameters::kg2oPixelVariance(), pixelVariance);
+	Parameters::parse(parameters_, Parameters::kOptimizerPixelVariance(), pixelVariance);
 	if(req->type == 1.0f)
 	{
 		optimizer = (int)Optimizer::kTypeCVSBA;
@@ -3494,9 +3875,9 @@ void CoreWrapper::getNodeDataCallback(
 			req->grid?"true":"false",
 			req->user_data?"true":"false");
 
-	if(req->ids.empty() && rtabmap_.getMemory() && rtabmap_.getMemory()->getLastWorkingSignature())
+	if(req->ids.empty() && rtabmap_.getMemory() && rtabmap_.getMemory()->getLastWorkingSignature(true))
 	{
-		req->ids.push_back(rtabmap_.getMemory()->getLastWorkingSignature()->id());
+		req->ids.push_back(rtabmap_.getMemory()->getLastWorkingSignature(true)->id());
 	}
 	for(size_t i=0; i<req->ids.size(); ++i)
 	{
@@ -3534,6 +3915,8 @@ void CoreWrapper::getMapDataCallback(
 			!req->graph_only,
 			!req->graph_only,
 			!req->graph_only,
+			!req->graph_only,
+			!req->graph_only,
 			!req->graph_only);
 
 	mapToOdomMutex_.lock();
@@ -3560,13 +3943,15 @@ void CoreWrapper::getMapData2Callback(
 		const std::shared_ptr<rtabmap_msgs::srv::GetMap2::Request> req,
 		std::shared_ptr<rtabmap_msgs::srv::GetMap2::Response> res)
 {
-	RCLCPP_INFO(get_logger(), "rtabmap: Getting map (global=%s optimized=%s with_images=%s with_scans=%s with_user_data=%s with_grids=%s)...",
+	RCLCPP_INFO(get_logger(), "rtabmap: Getting map (global=%s optimized=%s with_images=%s with_scans=%s with_user_data=%s with_grids=%s with_words=%s with_global_descriptors=%s)...",
 			req->global_map?"true":"false",
 			req->optimized?"true":"false",
 			req->with_images?"true":"false",
 			req->with_scans?"true":"false",
 			req->with_user_data?"true":"false",
-			req->with_grids?"true":"false");
+			req->with_grids?"true":"false",
+			req->with_words?"true":"false",
+			req->with_global_descriptors?"true":"false");
 	std::map<int, Signature> signatures;
 	std::map<int, Transform> poses;
 	std::multimap<int, rtabmap::Link> constraints;

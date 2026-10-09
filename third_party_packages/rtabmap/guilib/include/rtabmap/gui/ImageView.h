@@ -34,7 +34,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QtCore/QRectF>
 #include <QtCore/QMultiMap>
 #include <QtCore/QSettings>
+#include <opencv2/core/version.hpp>
+#if CV_MAJOR_VERSION < 5
 #include <opencv2/features2d/features2d.hpp>
+#else
+#include <opencv2/features.hpp>
+#endif
 #include <map>
 #include "rtabmap/utilite/UCv2Qt.h"
 #include <rtabmap/core/CameraModel.h>
@@ -60,6 +65,7 @@ public:
 	QRectF sceneRect() const;
 	bool isImageShown() const;
 	bool isImageDepthShown() const;
+	bool isImageDepthConfidenceShown() const;
 	bool isFeaturesShown() const;
 	bool isLinesShown() const;
 	int getAlpha() const {return _alpha;}
@@ -76,12 +82,14 @@ public:
 	float getDepthColorMapMinRange() const;
 	float getDepthColorMapMaxRange() const;
 	uCvQtDepthColorMap getDepthColorMap() const;
+	bool isDepthColorMapInCameraFrame() const;
 
 	float viewScale() const;
 
 	void setFeaturesShown(bool shown);
 	void setImageShown(bool shown);
 	void setImageDepthShown(bool shown);
+	void setImageDepthConfidenceShown(bool shown);
 	void setLinesShown(bool shown);
 	void setGraphicsViewMode(bool on);
 	void setGraphicsViewScaled(bool scaled);
@@ -92,14 +100,15 @@ public:
 	void setDefaultMatchingLineColor(const QColor & color);
 	void setBackgroundColor(const QColor & color);
 	void setDepthColorMapRange(float min, float max);
+	void setDepthColorMapInCameraFrame(bool enabled);
 
 	void setFeatures(const std::multimap<int, cv::KeyPoint> & refWords, const cv::Mat & depth = cv::Mat(), const QColor & color = Qt::yellow);
 	void setFeatures(const std::vector<cv::KeyPoint> & features, const cv::Mat & depth = cv::Mat(), const QColor & color = Qt::yellow);
 	void addFeature(int id, const cv::KeyPoint & kpt, float depth, QColor color);
 	void addLine(float x1, float y1, float x2, float y2, QColor color, const QString & text = QString());
 	void setImage(const QImage & image, const std::vector<CameraModel> & models = std::vector<CameraModel>(), const Transform & pose = Transform());
-	void setImageDepth(const cv::Mat & imageDepth);
-	void setImageDepth(const QImage & image);
+	void setImageDepth(const cv::Mat & imageDepth, const cv::Mat & imageDepthConfidence = cv::Mat());
+	void setImageDepth(const QImage & image, const QImage & imageDepthConfidence = QImage());
 	void setFeatureColor(int id, QColor color);
 	void setFeaturesColor(QColor color);
 	void setAlpha(int alpha);
@@ -147,6 +156,7 @@ private:
 	QMenu * _menu;
 	QAction * _showImage;
 	QAction * _showImageDepth;
+	QAction * _showImageDepthConfidence;
 	QAction * _showFeatures;
 	QAction * _showLines;
 	QAction * _setFeatureColor;
@@ -164,6 +174,7 @@ private:
 	QAction * _colorMapBlackToWhite;
 	QAction * _colorMapRedToBlue;
 	QAction * _colorMapBlueToRed;
+	QAction * _colorMapInCameraFrame;
 	QAction * _colorMapMinRange;
 	QAction * _colorMapMaxRange;
 	QAction * _mouseTracking;
@@ -175,9 +186,12 @@ private:
 	QList<QGraphicsLineItem*> _lines;
 	QGraphicsPixmapItem * _imageItem;
 	QGraphicsPixmapItem * _imageDepthItem;
+	QGraphicsPixmapItem * _imageDepthConfidenceItem;
 	QPixmap _image;
 	QPixmap _imageDepth;
+	QPixmap _imageDepthConfidence;
 	cv::Mat _imageDepthCv;
+	cv::Mat _imageDepthConfidenceCv;
 	std::vector<CameraModel> _models;
 	Transform _pose;
 };

@@ -33,9 +33,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <std_srvs/srv/empty.hpp>
 
-#include <tf2_ros/buffer.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/buffer.hpp>
+#include <tf2_ros/transform_listener.hpp>
+#include <tf2_ros/transform_broadcaster.hpp>
 
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -69,6 +69,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap_msgs/msg/info.hpp"
 #include "rtabmap_msgs/msg/landmark_detection.hpp"
 #include "rtabmap_msgs/msg/landmark_detections.hpp"
+#include "rtabmap_msgs/msg/env_sensor.h"
 #include "rtabmap_msgs/srv/get_nodes_in_radius.hpp"
 #include "rtabmap_msgs/srv/load_database.hpp"
 #include "rtabmap_msgs/srv/detect_more_loop_closures.hpp"
@@ -88,6 +89,22 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #endif
 
+#ifdef WITH_ARUCO_MSGS
+#include <aruco_msgs/msg/marker_array.hpp>
+#endif
+
+#ifdef WITH_ARUCO_OPENCV_MSGS
+#include <aruco_opencv_msgs/msg/aruco_detection.hpp>
+#endif
+
+#ifdef WITH_ARUCO_MARKERS_MSGS
+#include <aruco_markers_msgs/msg/marker_array.hpp>
+#endif
+
+#ifdef WITH_ROS2_ARUCO_INTERFACES
+#include <ros2_aruco_interfaces/msg/aruco_markers.hpp>
+#endif
+
 #ifdef WITH_NAV2_MSGS
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -104,9 +121,35 @@ class StereoDense;
 
 namespace rtabmap_slam {
 
+/**
+ * @brief The `rtabmap` node: graph SLAM around an rtabmap::Rtabmap instance.
+ *
+ * Registered as the `rtabmap_slam::CoreWrapper` component, and run by the `rtabmap`
+ * executable. The node is always named `rtabmap` unless remapped, and advertises its
+ * services under that name (`/rtabmap/reset`...).
+ *
+ * The input topics come from rtabmap_sync::CommonDataSubscriber, chosen by the
+ * `subscribe_*` parameters; each synchronized update is converted to an
+ * rtabmap::SensorData and processed on a callback group of its own, while asynchronous
+ * inputs (GPS, IMU, landmarks, user data...) are buffered on theirs and attached to the
+ * next update. An update arriving while the previous one is still processed is dropped.
+ *
+ * The graph is published on `mapGraph`, `mapData` and `mapPath`, the assembled maps
+ * through an rtabmap_util::MapsManager, and the correction `map` -> odometry frame on TF.
+ * The database is saved when the node is destroyed.
+ *
+ * See the package README and doc/rtabmap.md for the topics, parameters and services.
+ */
 class CoreWrapper : public rclcpp::Node, public rtabmap_sync::CommonDataSubscriber
 {
 public:
+	/**
+	 * @brief Declares the parameters, opens the database and sets up every topic and
+	 *        service.
+	 *
+	 * RTAB-Map parameters are declared as strings under their RTAB-Map names, except the
+	 * odometry ones. Throws if one is given with another type.
+	 */
 	RTABMAP_SLAM_PUBLIC
 	explicit CoreWrapper(const rclcpp::NodeOptions & options);
 	virtual ~CoreWrapper();
@@ -175,10 +218,24 @@ private:
 	void userDataAsyncCallback(const rtabmap_msgs::msg::UserData::SharedPtr dataMsg);
 	void globalPoseAsyncCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr globalPoseMsg);
 	void gpsFixAsyncCallback(const sensor_msgs::msg::NavSatFix::SharedPtr gpsFixMsg);
+	void envSensorAsyncCallback(const rtabmap_msgs::msg::EnvSensor::SharedPtr envSensorMsg);
 	void landmarkDetectionAsyncCallback(const rtabmap_msgs::msg::LandmarkDetection::SharedPtr landmarkDetection);
 	void landmarkDetectionsAsyncCallback(const rtabmap_msgs::msg::LandmarkDetections::SharedPtr landmarkDetections);
 #ifdef WITH_APRILTAG_MSGS
-	void tagDetectionsAsyncCallback(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr tagDetections);
+	void tagDetectionsAsyncCallback(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr msg);
+	void apriltagAsyncCallback(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr msg);
+#endif
+#ifdef WITH_ARUCO_MSGS
+	void arucoAsyncCallback(const aruco_msgs::msg::MarkerArray::SharedPtr msg);
+#endif
+#ifdef WITH_ARUCO_OPENCV_MSGS
+	void arucoOpencvAsyncCallback(const aruco_opencv_msgs::msg::ArucoDetection::SharedPtr msg);
+#endif
+#ifdef WITH_ARUCO_MARKERS_MSGS
+	void arucoMarkersAsyncCallback(const aruco_markers_msgs::msg::MarkerArray::SharedPtr msg);
+#endif
+#ifdef WITH_ROS2_ARUCO_INTERFACES
+	void arucoInterfacesAsyncCallback(const ros2_aruco_interfaces::msg::ArucoMarkers::SharedPtr msg);
 #endif
 #ifdef WITH_FIDUCIAL_MSGS
 	void fiducialDetectionsAsyncCallback(const fiducial_msgs::msgs::FiducialTransformArray::SharedPtr fiducialDetections);
@@ -214,6 +271,8 @@ private:
 	std::map<int, rtabmap::Transform> filterNodesToAssemble(
 			const std::map<int, rtabmap::Transform> & nodes,
 			const rtabmap::Transform & currentPose);
+	
+	void applyParameters();
 
 	void updateRtabmapCallback(const std::shared_ptr<rmw_request_id_t>, const std::shared_ptr<std_srvs::srv::Empty::Request>, std::shared_ptr<std_srvs::srv::Empty::Response>);
 	void resetRtabmapCallback(const std::shared_ptr<rmw_request_id_t>, const std::shared_ptr<std_srvs::srv::Empty::Request>, std::shared_ptr<std_srvs::srv::Empty::Response>);
@@ -305,6 +364,7 @@ private:
 	double landmarkDefaultAngVariance_;
 	double landmarkDefaultLinVariance_;
 	double waitForTransform_;
+	double stalenessFactor_;
 	bool useActionForGoal_;
 	bool useSavedMap_;
 	bool genScan_;
@@ -405,16 +465,39 @@ private:
 	cv::Mat userData_;
 	UMutex userDataMutex_;
 
+	rclcpp::CallbackGroup::SharedPtr globalPoseAsyncCallbackGroup_;
 	rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr globalPoseAsyncSub_;
-	geometry_msgs::msg::PoseWithCovarianceStamped globalPose_;
+	std::map<double, geometry_msgs::msg::PoseWithCovarianceStamped> globalPoses_;
+	UMutex globalPoseMutex_;
+
+	rclcpp::CallbackGroup::SharedPtr gpsAsyncCallbackGroup_;
 	rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gpsFixAsyncSub_;
-	rtabmap::GPS gps_;
+	std::map<double, rtabmap::GPS> gps_;
+	UMutex gpsMutex_;
+
+	rclcpp::CallbackGroup::SharedPtr envSensorAsyncCallbackGroup_;
+	rclcpp::Subscription<rtabmap_msgs::msg::EnvSensor>::SharedPtr envSensorAsyncSub_;
+	rtabmap::EnvSensors envSensors_;
+	UMutex envSensorMutex_;
 
 	rclcpp::CallbackGroup::SharedPtr landmarkCallbackGroup_;
 	rclcpp::Subscription<rtabmap_msgs::msg::LandmarkDetection>::SharedPtr landmarkDetectionSub_;
 	rclcpp::Subscription<rtabmap_msgs::msg::LandmarkDetections>::SharedPtr landmarkDetectionsSub_;
 #ifdef WITH_APRILTAG_MSGS
 	rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr tagDetectionsSub_;
+	rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr apriltagSub_;
+#endif
+#ifdef WITH_ARUCO_MSGS
+	rclcpp::Subscription<aruco_msgs::msg::MarkerArray>::SharedPtr arucoSub_;
+#endif
+#ifdef WITH_ARUCO_OPENCV_MSGS
+	rclcpp::Subscription<aruco_opencv_msgs::msg::ArucoDetection>::SharedPtr arucoOpencvSub_;
+#endif
+#ifdef WITH_ARUCO_MARKERS_MSGS
+	rclcpp::Subscription<aruco_markers_msgs::msg::MarkerArray>::SharedPtr arucoMarkersSub_;
+#endif
+#ifdef WITH_ROS2_ARUCO_INTERFACES
+	rclcpp::Subscription<ros2_aruco_interfaces::msg::ArucoMarkers>::SharedPtr arucoInterfacesSub_;
 #endif
 #ifdef WITH_FIDUCIAL_MSGS
 	rclcpp::Subscription<fiducial_msgs::msg::FiducialTransformArray>::SharedPtr fiducialTransfromsSub_;

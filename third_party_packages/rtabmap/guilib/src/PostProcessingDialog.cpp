@@ -40,30 +40,28 @@ PostProcessingDialog::PostProcessingDialog(QWidget * parent) :
 	_ui = new Ui_PostProcessingDialog();
 	_ui->setupUi(this);
 
-	if(!Optimizer::isAvailable(Optimizer::kTypeCVSBA) &&
-		!Optimizer::isAvailable(Optimizer::kTypeG2O) &&
-		!Optimizer::isAvailable(Optimizer::kTypeCeres))
+	int firstAvailable = -1;
+	for(int i = 0; i < _ui->comboBox_sbaType->count(); ++i)
+	{
+		const Optimizer::Type type = static_cast<Optimizer::Type>(i);
+		const bool usable = type != Optimizer::kTypeTORO && Optimizer::isAvailable(type);
+		if(usable)
+		{
+			if(firstAvailable < 0) firstAvailable = i;
+		}
+		else
+		{
+			_ui->comboBox_sbaType->setItemData(i, 0, Qt::UserRole - 1);
+		}
+	}
+	if(firstAvailable < 0)
 	{
 		_ui->sba->setEnabled(false);
 		_ui->sba->setChecked(false);
 	}
 	else
 	{
-		if(!Optimizer::isAvailable(Optimizer::kTypeCVSBA))
-		{
-			_ui->comboBox_sbaType->setItemData(1, 0, Qt::UserRole - 1);
-			_ui->comboBox_sbaType->setCurrentIndex(0);
-		}
-		if(!Optimizer::isAvailable(Optimizer::kTypeG2O))
-		{
-			_ui->comboBox_sbaType->setItemData(0, 0, Qt::UserRole - 1);
-			_ui->comboBox_sbaType->setCurrentIndex(1);
-		}
-		if(!Optimizer::isAvailable(Optimizer::kTypeCeres))
-		{
-			_ui->comboBox_sbaType->setItemData(2, 0, Qt::UserRole - 1);
-			_ui->comboBox_sbaType->setCurrentIndex(1);
-		}
+		_ui->comboBox_sbaType->setCurrentIndex(firstAvailable);
 	}
 
 	restoreDefaults();
@@ -82,6 +80,7 @@ PostProcessingDialog::PostProcessingDialog(QWidget * parent) :
 	connect(_ui->iterations, SIGNAL(valueChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->intraSession, SIGNAL(stateChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->interSession, SIGNAL(stateChanged(int)), this, SIGNAL(configChanged()));
+	connect(_ui->minGraphDistance, SIGNAL(valueChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->refineNeighborLinks, SIGNAL(stateChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->refineLoopClosureLinks, SIGNAL(stateChanged(int)), this, SIGNAL(configChanged()));
 
@@ -134,8 +133,13 @@ bool PostProcessingDialog::validateForm()
 
 void PostProcessingDialog::updateVisibility()
 {
-	_ui->sba_variance->setVisible(_ui->comboBox_sbaType->currentIndex() == 0);
-	_ui->label_variance->setVisible(_ui->comboBox_sbaType->currentIndex() == 0);
+	// Pixel variance applies to every BA backend except CVSBA (its
+	// underlying Sba::run() API takes 2D points only -- no info-matrix
+	// knob).
+	const Optimizer::Type type = static_cast<Optimizer::Type>(_ui->comboBox_sbaType->currentIndex());
+	const bool usesPixelVariance = type != Optimizer::kTypeCVSBA;
+	_ui->sba_variance->setVisible(usesPixelVariance);
+	_ui->label_variance->setVisible(usesPixelVariance);
 }
 
 void PostProcessingDialog::saveSettings(QSettings & settings, const QString & group) const
@@ -150,6 +154,7 @@ void PostProcessingDialog::saveSettings(QSettings & settings, const QString & gr
 	settings.setValue("iterations", this->iterations());
 	settings.setValue("intra_session", this->intraSession());
 	settings.setValue("inter_session", this->interSession());
+	settings.setValue("min_graph_distance", this->minGraphDistance());
 	settings.setValue("refine_neigbors", this->isRefineNeighborLinks());
 	settings.setValue("refine_lc", this->isRefineLoopClosureLinks());
 	settings.setValue("sba", this->isSBA());
@@ -175,6 +180,7 @@ void PostProcessingDialog::loadSettings(QSettings & settings, const QString & gr
 	this->setIterations(settings.value("iterations", this->iterations()).toInt());
 	this->setIntraSession(settings.value("intra_session", this->intraSession()).toBool());
 	this->setInterSession(settings.value("inter_session", this->interSession()).toBool());
+	this->setMinGraphDistance(settings.value("min_graph_distance", this->minGraphDistance()).toInt());
 	this->setRefineNeighborLinks(settings.value("refine_neigbors", this->isRefineNeighborLinks()).toBool());
 	this->setRefineLoopClosureLinks(settings.value("refine_lc", this->isRefineLoopClosureLinks()).toBool());
 	this->setSBA(settings.value("sba", this->isSBA()).toBool());
@@ -197,6 +203,7 @@ void PostProcessingDialog::restoreDefaults()
 	setIterations(5);
 	setIntraSession(true);
 	setInterSession(true);
+	setMinGraphDistance(10);
 	setRefineNeighborLinks(false);
 	setRefineLoopClosureLinks(false);
 	setSBA(false);
@@ -254,6 +261,11 @@ bool PostProcessingDialog::interSession() const
 	return _ui->interSession->isChecked();
 }
 
+int PostProcessingDialog::minGraphDistance() const
+{
+	return _ui->minGraphDistance->value();
+}
+
 bool PostProcessingDialog::isRefineNeighborLinks() const
 {
 	return _ui->refineNeighborLinks->isChecked();
@@ -279,7 +291,7 @@ double PostProcessingDialog::sbaVariance() const
 }
 Optimizer::Type PostProcessingDialog::sbaType() const
 {
-	return _ui->comboBox_sbaType->currentIndex()==2?Optimizer::kTypeCeres:_ui->comboBox_sbaType->currentIndex()==1?Optimizer::kTypeCVSBA:Optimizer::kTypeG2O;
+	return static_cast<Optimizer::Type>(_ui->comboBox_sbaType->currentIndex());
 }
 bool PostProcessingDialog::sbaRematchFeatures() const
 {
@@ -311,6 +323,10 @@ void PostProcessingDialog::setInterSession(bool enabled)
 {
 	_ui->interSession->setChecked(enabled);
 }
+void PostProcessingDialog::setMinGraphDistance(int value)
+{
+	_ui->minGraphDistance->setValue(value);
+}
 void PostProcessingDialog::setRefineNeighborLinks(bool on)
 {
 	_ui->refineNeighborLinks->setChecked(on);
@@ -336,18 +352,11 @@ void PostProcessingDialog::setSBAVariance(double variance)
 }
 void PostProcessingDialog::setSBAType(Optimizer::Type type)
 {
-	if(type == Optimizer::kTypeCeres)
+	if(type < 0 || type >= _ui->comboBox_sbaType->count())
 	{
-		_ui->comboBox_sbaType->setCurrentIndex(2);
+		type = Optimizer::kTypeG2O;
 	}
-	else if(type == Optimizer::kTypeCVSBA)
-	{
-		_ui->comboBox_sbaType->setCurrentIndex(1);
-	}
-	else
-	{
-		_ui->comboBox_sbaType->setCurrentIndex(0);
-	}
+	_ui->comboBox_sbaType->setCurrentIndex(static_cast<int>(type));
 }
 void PostProcessingDialog::setSBARematchFeatures(bool value)
 {

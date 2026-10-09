@@ -144,7 +144,12 @@ std::vector<cv::KeyPoint> SPDetector::detect(const cv::Mat &img, const cv::Mat &
 	UASSERT(img.type() == CV_8UC1);
 	UASSERT(mask.empty() || (mask.type() == CV_8UC1 && img.cols == mask.cols && img.rows == mask.rows));
 	detected_ = false;
-	if(model_)
+	if(!model_)
+	{
+		UERROR("No model is loaded!");
+		return std::vector<cv::KeyPoint>();
+	}
+	try
 	{
 		torch::NoGradGuard no_grad_guard;
 		auto x = torch::from_blob(img.data, {1, 1, img.rows, img.cols}, torch::kByte);
@@ -199,9 +204,9 @@ std::vector<cv::KeyPoint> SPDetector::detect(const cv::Mat &img, const cv::Mat &
 		detected_ = true;
 		return keypoints;
 	}
-	else
+	catch(const std::exception & e)
 	{
-		UERROR("No model is loaded!");
+		UERROR("SPDetector::detect() threw: %s", e.what());
 		return std::vector<cv::KeyPoint>();
 	}
 }
@@ -242,8 +247,7 @@ cv::Mat SPDetector::compute(const std::vector<cv::KeyPoint> &keypoints)
 		auto desc = torch::grid_sampler(desc_, grid, 0, 0, true);  // [1, 256, 1, n_keypoints]
 
 		// normalize to 1
-		desc = torch::nn::functional::normalize(desc.reshape({1, desc_.size(1), -1})); //[1, 256, n_keypoints]
-		desc = desc.squeeze(); //[256, n_keypoints]
+		desc = torch::nn::functional::normalize(desc.reshape({desc_.size(1), -1}), torch::nn::functional::NormalizeFuncOptions().dim(0)); //[256, n_keypoints]
 		desc = desc.transpose(0, 1).contiguous(); //[n_keypoints, 256]
 
 		if(cuda_)

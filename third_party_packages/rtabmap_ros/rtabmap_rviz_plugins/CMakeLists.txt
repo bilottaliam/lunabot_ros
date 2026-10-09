@@ -5,6 +5,18 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+  # issues #1285 #1288
+  find_library(
+    message_filters_LIB NAMES message_filters
+    PATHS "/opt/ros/$ENV{ROS_DISTRO}/lib"
+    NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH REQUIRED
+  )
+endif()
+
+# Make sure it is first to prevent Qt6 from claiming the generic versionless targets first
+find_package(Qt5 QUIET COMPONENTS Widgets)
+
 find_package(ament_cmake_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -23,6 +35,19 @@ include_directories(
 )
 
 SET(Libraries
+  pcl_conversions::pcl_conversions
+  pluginlib::pluginlib
+  rclcpp::rclcpp
+  rviz_common::rviz_common
+  rviz_rendering::rviz_rendering
+  rviz_default_plugins::rviz_default_plugins
+  sensor_msgs::sensor_msgs
+  std_msgs::std_msgs
+  tf2::tf2
+  rtabmap_conversions::rtabmap_conversions
+  rtabmap_msgs::rtabmap_msgs
+)
+SET(AmentLibraries
   pcl_conversions
   pluginlib
   rclcpp
@@ -35,9 +60,6 @@ SET(Libraries
   rtabmap_conversions
   rtabmap_msgs
 )
-
-MESSAGE(STATUS "rtabmap_conversions=${rtabmap_conversions_LIBRARIES}")
-
 
 ###########
 ## Build ##
@@ -66,8 +88,11 @@ target_include_directories(rtabmap_rviz_plugins
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-
-ament_target_dependencies(rtabmap_rviz_plugins ${Libraries})
+if("$ENV{ROS_DISTRO}" STRLESS "lyrical")
+  ament_target_dependencies(rtabmap_rviz_plugins ${AmentLibraries})
+ELSE()
+  target_link_libraries(rtabmap_rviz_plugins PRIVATE ${Libraries})
+ENDIF()
 
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.

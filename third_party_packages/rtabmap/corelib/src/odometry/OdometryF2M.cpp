@@ -26,7 +26,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include "rtabmap/core/OdometryInfo.h"
-#include "rtabmap/core/Memory.h"
 #include "rtabmap/core/Signature.h"
 #include "rtabmap/core/RegistrationVis.h"
 #include "rtabmap/core/util3d.h"
@@ -41,8 +40,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/utilite/ULogger.h"
 #include "rtabmap/utilite/UTimer.h"
 #include "rtabmap/utilite/UMath.h"
+#include "rtabmap/utilite/UStl.h"
 #include "rtabmap/utilite/UConversion.h"
+#if CV_MAJOR_VERSION < 5
 #include <opencv2/calib3d/calib3d.hpp>
+#else
+#include <opencv2/geometry.hpp>
+#endif
 #include <rtabmap/core/odometry/OdometryF2M.h>
 #include <pcl/common/io.h>
 
@@ -60,6 +64,8 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	keyFrameThr_(Parameters::defaultOdomKeyFrameThr()),
 	visKeyFrameThr_(Parameters::defaultOdomVisKeyFrameThr()),
 	maxNewFeatures_(Parameters::defaultOdomF2MMaxNewFeatures()),
+	initDepthFactor_(Parameters::defaultOdomF2MInitDepthFactor()),
+	floorThreshold_(Parameters::defaultOdomF2MFloorThreshold()),
 	scanKeyFrameThr_(Parameters::defaultOdomScanKeyFrameThr()),
 	scanMaximumMapSize_(Parameters::defaultOdomF2MScanMaxSize()),
 	scanSubtractRadius_(Parameters::defaultOdomF2MScanSubtractRadius()),
@@ -67,6 +73,9 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	scanMapMaxRange_(Parameters::defaultOdomF2MScanRange()),
 	bundleAdjustment_(Parameters::defaultOdomF2MBundleAdjustment()),
 	bundleMaxFrames_(Parameters::defaultOdomF2MBundleAdjustmentMaxFrames()),
+	bundleMinMotion_(Parameters::defaultOdomF2MBundleAdjustmentMinMotion()),
+	bundleMaxKeyFramesPerFeature_(Parameters::defaultOdomF2MBundleAdjustmentMaxKeyFramesPerFeature()),
+	bundleUpdateFeatureMapOnAllFrames_(Parameters::defaultOdomF2MBundleUpdateFeatureMapOnAllFrames()),
 	validDepthRatio_(Parameters::defaultOdomF2MValidDepthRatio()),
 	pointToPlaneK_(Parameters::defaultIcpPointToPlaneK()),
 	pointToPlaneRadius_(Parameters::defaultIcpPointToPlaneRadius()),
@@ -81,6 +90,8 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	Parameters::parse(parameters, Parameters::kOdomKeyFrameThr(), keyFrameThr_);
 	Parameters::parse(parameters, Parameters::kOdomVisKeyFrameThr(), visKeyFrameThr_);
 	Parameters::parse(parameters, Parameters::kOdomF2MMaxNewFeatures(), maxNewFeatures_);
+	Parameters::parse(parameters, Parameters::kOdomF2MInitDepthFactor(), initDepthFactor_);
+	Parameters::parse(parameters, Parameters::kOdomF2MFloorThreshold(), floorThreshold_);
 	Parameters::parse(parameters, Parameters::kOdomScanKeyFrameThr(), scanKeyFrameThr_);
 	Parameters::parse(parameters, Parameters::kOdomF2MScanMaxSize(), scanMaximumMapSize_);
 	Parameters::parse(parameters, Parameters::kOdomF2MScanSubtractRadius(), scanSubtractRadius_);
@@ -91,6 +102,9 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	Parameters::parse(parameters, Parameters::kOdomF2MScanRange(), scanMapMaxRange_);
 	Parameters::parse(parameters, Parameters::kOdomF2MBundleAdjustment(), bundleAdjustment_);
 	Parameters::parse(parameters, Parameters::kOdomF2MBundleAdjustmentMaxFrames(), bundleMaxFrames_);
+	Parameters::parse(parameters, Parameters::kOdomF2MBundleAdjustmentMinMotion(), bundleMinMotion_);
+	Parameters::parse(parameters, Parameters::kOdomF2MBundleAdjustmentMaxKeyFramesPerFeature(), bundleMaxKeyFramesPerFeature_);
+	Parameters::parse(parameters, Parameters::kOdomF2MBundleUpdateFeatureMapOnAllFrames(), bundleUpdateFeatureMapOnAllFrames_);
 	Parameters::parse(parameters, Parameters::kOdomF2MValidDepthRatio(), validDepthRatio_);
 
 	Parameters::parse(parameters, Parameters::kIcpPointToPlaneK(), pointToPlaneK_);
@@ -100,13 +114,15 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	ParametersMap bundleParameters = parameters;
 	if(bundleAdjustment_ > 0)
 	{
-		if((bundleAdjustment_==1 && Optimizer::isAvailable(Optimizer::kTypeG2O)) ||
-		(bundleAdjustment_==2 && Optimizer::isAvailable(Optimizer::kTypeCVSBA)) ||
-		(bundleAdjustment_==3 && Optimizer::isAvailable(Optimizer::kTypeCeres)))
+		// The BundleAdjustment int matches the Optimizer/Strategy parameter
+		// 1:1 (g2o=1, GTSAM=2, Ceres=3, CVSBA=4). 0 = "disabled" -- it's
+		// the TORO slot, which isn't BA-capable.
+		const Optimizer::Type sbaType = static_cast<Optimizer::Type>(bundleAdjustment_);
+		if(Optimizer::isAvailable(sbaType))
 		{
 			// disable bundle in RegistrationVis as we do it already here
 			uInsert(bundleParameters, ParametersPair(Parameters::kVisBundleAdjustment(), "0"));
-			sba_ = Optimizer::create(bundleAdjustment_==3?Optimizer::kTypeCeres:bundleAdjustment_==2?Optimizer::kTypeCVSBA:Optimizer::kTypeG2O, bundleParameters);
+			sba_ = Optimizer::create(sbaType, bundleParameters);
 		}
 		else
 		{
@@ -120,6 +136,7 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	UASSERT(visKeyFrameThr_>=0);
 	UASSERT(scanKeyFrameThr_ >= 0.0f && scanKeyFrameThr_<=1.0f);
 	UASSERT(maxNewFeatures_ >= 0);
+	UASSERT(initDepthFactor_>0.0f);
 
 	int corType = Parameters::defaultVisCorType();
 	Parameters::parse(parameters, Parameters::kVisCorType(), corType);
@@ -142,16 +159,6 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 		estType = 1;
 	}
 	uInsert(bundleParameters, ParametersPair(Parameters::kVisEstimationType(), uNumber2Str(estType)));
-
-	bool forwardEst = Parameters::defaultVisForwardEstOnly();
-	Parameters::parse(parameters, Parameters::kVisForwardEstOnly(), forwardEst);
-	if(!forwardEst)
-	{
-		UWARN("%s=false is not supported by OdometryF2M, setting to true.",
-				Parameters::kVisForwardEstOnly().c_str());
-		forwardEst = true;
-	}
-	uInsert(bundleParameters, ParametersPair(Parameters::kVisForwardEstOnly(), uBool2Str(forwardEst)));
 
 	regPipeline_ = Registration::create(bundleParameters);
 	if(bundleAdjustment_>0 && regPipeline_->isScanRequired())
@@ -280,6 +287,7 @@ Transform OdometryF2M::computeTransform(
 			std::map<int, Transform> bundlePoses;
 			std::multimap<int, Link> bundleLinks;
 			std::map<int, std::vector<CameraModel> > bundleModels;
+			float bundleAvgInlierDistance = 0.0f;
 
 			for(int guessIteration=0;
 					guessIteration<(!guess.isNull()&&regPipeline_->isImageRequired()?2:1) && transform.isNull();
@@ -386,6 +394,7 @@ Transform OdometryF2M::computeTransform(
 
 							UDEBUG("Fill matches (%d)", (int)regInfo.inliersIDs.size());
 							std::map<int, std::map<int, FeatureBA> > wordReferences;
+							size_t maxKeyFramesForInlier = 0;
 							for(unsigned int i=0; i<regInfo.inliersIDs.size(); ++i)
 							{
 								int wordId =regInfo.inliersIDs[i];
@@ -398,6 +407,10 @@ Transform OdometryF2M::computeTransform(
 								// all other references
 								std::map<int, std::map<int, FeatureBA> >::iterator refIter = bundleWordReferences_.find(wordId);
 								UASSERT_MSG(refIter != bundleWordReferences_.end(), uFormat("wordId=%d", wordId).c_str());
+								if(info && refIter->second.size() > maxKeyFramesForInlier)
+								{
+									maxKeyFramesForInlier = refIter->second.size();
+								}
 
 								std::map<int, FeatureBA> references;
 								int step = bundleMaxFrames_>0?(refIter->second.size() / bundleMaxFrames_):1;
@@ -460,18 +473,28 @@ Transform OdometryF2M::computeTransform(
 
 							UDEBUG("sba...start");
 							// set root negative to fix all other poses
-							std::set<int> sbaOutliers;
+							BAOutliers sbaOutliers;
 							UTimer bundleTimer;
 							bundlePoses = sba_->optimizeBA(-lastFrame_->id(), bundlePoses, bundleLinks, bundleModels, points3DMap, wordReferences, &sbaOutliers);
 							bundleTime = bundleTimer.ticks();
 							UDEBUG("sba...end");
-							totalBundleOutliers = (int)sbaOutliers.size();
+							int sbaOutliersCount = 0;
+							for(unsigned int i=0; i<regInfo.inliersIDs.size(); ++i)
+							{
+								BAOutliers::const_iterator iter = sbaOutliers.find(regInfo.inliersIDs[i]);
+								if(iter != sbaOutliers.end() && iter->second.find(lastFrame_->id()) != iter->second.end())
+								{
+									++sbaOutliersCount;
+								}
+							}
+							totalBundleOutliers = sbaOutliersCount;
 
-							UDEBUG("bundleTime=%fs (poses=%d wordRef=%d outliers=%d)", bundleTime, (int)bundlePoses.size(), (int)bundleWordReferences_.size(), (int)sbaOutliers.size());
+							UDEBUG("bundleTime=%fs (poses=%d wordRef=%d outliers=%d)", bundleTime, (int)bundlePoses.size(), (int)bundleWordReferences_.size(), sbaOutliersCount);
 							if(info)
 							{
 								info->localBundlePoses = bundlePoses;
 								info->localBundleModels = bundleModels;
+								info->localBundleMaxKeyFramesForInlier = maxKeyFramesForInlier;
 							}
 
 							UDEBUG("Local Bundle Adjustment Before: %s", transform.prettyPrint().c_str());
@@ -479,19 +502,30 @@ Transform OdometryF2M::computeTransform(
 							{
 								if(!bundlePoses.rbegin()->second.isNull())
 								{
-									if(sbaOutliers.size())
+									if(info)
 									{
+										info->localBundleOutliersPerCam = std::vector<int>(lastFrameModels.size(),0);
+									}
+									if(sbaOutliersCount)
+									{
+										regInfo.inliersPerCam = std::vector<int>(lastFrameModels.size(),0);
 										std::vector<int> newInliers(regInfo.inliersIDs.size());
 										int oi=0;
 										for(unsigned int i=0; i<regInfo.inliersIDs.size(); ++i)
 										{
-											if(sbaOutliers.find(regInfo.inliersIDs[i]) == sbaOutliers.end())
+											BAOutliers::const_iterator iter = sbaOutliers.find(regInfo.inliersIDs[i]);
+											if(iter == sbaOutliers.end() || iter->second.find(lastFrame_->id()) == iter->second.end())
 											{
 												newInliers[oi++] = regInfo.inliersIDs[i];
+												regInfo.inliersPerCam[wordReferences.at(regInfo.inliersIDs[i]).at(lastFrame_->id()).cameraIndex] += 1;
+											}
+											else if(info)
+											{
+												info->localBundleOutliersPerCam[wordReferences.at(regInfo.inliersIDs[i]).at(lastFrame_->id()).cameraIndex] += 1;
 											}
 										}
 										newInliers.resize(oi);
-										UDEBUG("BA outliers ratio %f", float(sbaOutliers.size())/float(regInfo.inliersIDs.size()));
+										UDEBUG("BA outliers ratio %f", float(sbaOutliersCount)/float(regInfo.inliersIDs.size()));
 										regInfo.inliers = (int)newInliers.size();
 										regInfo.inliersIDs = newInliers;
 									}
@@ -534,13 +568,52 @@ Transform OdometryF2M::computeTransform(
 											regInfo.covariance.at<double>(4,4) *= 0.1;
 										if(regInfo.covariance.at<double>(5,5)>thrAng)
 											regInfo.covariance.at<double>(5,5) *= 0.1;
+
+										// Estimate how much the new frame moved from previous frame in term of pixels
+										if(bundleMinMotion_ > 0.0f)
+										{
+											UASSERT(!bundlePoses_.empty());
+											int count = 0;
+											for(unsigned int i=0; i<regInfo.inliersIDs.size(); ++i)
+											{
+												std::map<int, std::map<int, FeatureBA> >::iterator wter = wordReferences.find(regInfo.inliersIDs[i]);
+												if(wter != wordReferences.end())
+												{
+													std::map<int, FeatureBA>::iterator fter = wter->second.find(bundlePoses_.rbegin()->first);
+													if(fter != wter->second.end())
+													{
+														const FeatureBA & f1 = fter->second; // previous key-frame
+														const FeatureBA & f2 = wter->second.find(lastFrame_->id())->second; // current key-frame
+														float dx = f1.kpt.pt.x - f2.kpt.pt.x;
+														float dy = f1.kpt.pt.y - f2.kpt.pt.y;
+														bundleAvgInlierDistance += sqrt(dx*dx + dy*dy);
+														++count;
+													}
+												}
+											}
+											if(count)
+											{
+												bundleAvgInlierDistance /= count;
+											}
+											UDEBUG("Average pixel distance between %d inliers: %f", count, bundleAvgInlierDistance);
+											if(info)
+											{
+												info->localBundleAvgInlierDistance = bundleAvgInlierDistance;
+											}
+										}
 									}
+									UDEBUG("Local Bundle Adjustment After : %s", transform.prettyPrint().c_str());
 								}
-								UDEBUG("Local Bundle Adjustment After : %s", transform.prettyPrint().c_str());
+								else
+								{
+									regInfo.rejectedMsg = "Last bundle pose is null?!";
+									transform.setNull();
+								}
 							}
 							else
 							{
-								UWARN("Local bundle adjustment failed! transform is not refined.");
+								regInfo.rejectedMsg = "Local bundle adjustment failed!";
+								transform.setNull();
 							}
 						}
 					}
@@ -594,19 +667,73 @@ Transform OdometryF2M::computeTransform(
 				std::vector<cv::Point3f> mapPoints = tmpMap.getWords3();
 				cv::Mat mapDescriptors = tmpMap.getWordsDescriptors();
 
+				// update last frame features without depth (if bundle adjustment was done)
+				// Do this before adding bundle frames to keep mono observations without depth
+				bool lastFrameWords3Updated = false;
+				std::vector<cv::Point3f> lastFrameWords3;
+				if( regPipeline_->isImageRequired() &&
+					!visDepthAsMask &&
+				    bundleAdjustment_>0 &&
+					!lastFrame_->getWords().empty() &&
+					lastFrame_->getWords().size() == lastFrame_->getWords3().size() &&
+					!points3DMap.empty())
+				{
+					lastFrameWords3 = lastFrame_->getWords3();
+					Transform newFramePoseInv = newFramePose.inverse();
+					for(std::multimap<int, int>::const_iterator iter=lastFrame_->getWords().begin();
+					    iter!=lastFrame_->getWords().end();
+						++iter)
+					{
+						cv::Point3f & pt = lastFrameWords3.at(iter->second);
+						if(!util3d::isFinite(pt))
+						{
+							std::map<int, cv::Point3f>::iterator mapIter = points3DMap.find(iter->first);
+							if(mapIter != points3DMap.end())
+							{
+								// in base frame
+								pt = util3d::transformPoint(mapIter->second, newFramePoseInv);
+								lastFrameWords3Updated = true;
+							}
+						}
+					}
+				}
+
+				if( regPipeline_->isImageRequired() &&
+					bundleAdjustment_>0 &&
+					bundleUpdateFeatureMapOnAllFrames_ &&
+					!points3DMap.empty())
+				{
+					// update local map 3D points (if bundle adjustment was done)
+					for(std::map<int, cv::Point3f>::iterator iter=points3DMap.begin(); iter!=points3DMap.end(); ++iter)
+					{
+						UASSERT(mapWords.count(iter->first) == 1);
+						mapPoints[mapWords.find(iter->first)->second] = iter->second;
+					}
+					modified = true;
+				}
+
 				bool addVisualKeyFrame = regPipeline_->isImageRequired() &&
 						 (keyFrameThr_ == 0.0f ||
 						  visKeyFrameThr_ == 0 ||
 						  float(regInfo.inliers) <= (keyFrameThr_*float(lastFrame_->getWords().size())) ||
-						  regInfo.inliers <= visKeyFrameThr_);
+						  regInfo.inliers <= visKeyFrameThr_) &&
+						  (bundleAdjustment_==0 || bundleAvgInlierDistance >= bundleMinMotion_);
 
 				bool addGeometricKeyFrame = regPipeline_->isScanRequired() &&
 					(scanKeyFrameThr_==0 || regInfo.icpInliersRatio <= scanKeyFrameThr_);
 
-				addKeyFrame = false;//bundleLinks.rbegin()->second.transform().getNorm() > 5.0f*0.075f;
-				addKeyFrame = addKeyFrame || addVisualKeyFrame || addGeometricKeyFrame;
+				addKeyFrame = addVisualKeyFrame || addGeometricKeyFrame;
 
-				UDEBUG("keyframeThr=%f visKeyFrameThr_=%d matches=%d inliers=%d features=%d mp=%d", keyFrameThr_, visKeyFrameThr_, regInfo.matches, regInfo.inliers, (int)lastFrame_->sensorData().keypoints().size(), (int)mapPoints.size());
+				UDEBUG("keyframeThr=%f visKeyFrameThr_=%d matches=%d inliers=%d (avg dist=%f, min=%f) features=%d mp=%d",
+					keyFrameThr_,
+					visKeyFrameThr_,
+					regInfo.matches,
+					regInfo.inliers,
+					bundleAvgInlierDistance,
+					bundleMinMotion_,
+					(int)lastFrame_->sensorData().keypoints().size(),
+					(int)mapPoints.size());
+
 				if(addKeyFrame)
 				{
 					//Visual
@@ -615,6 +742,7 @@ Transform OdometryF2M::computeTransform(
 					UTimer tmpTimer;
 
 					UDEBUG("Update local map");
+					modified = bundleAdjustment_>0; // We always add new references even if we don't add/remove points
 
 					// update local map
 					UASSERT(mapWords.size() == mapPoints.size());
@@ -639,12 +767,14 @@ Transform OdometryF2M::computeTransform(
 						bundleModels_.insert(*bundleModels.find(lastFrame_->id()));
 						iterBundlePosesRef = bundlePoseReferences_.find(lastFrame_->id());
 
-						// update local map 3D points (if bundle adjustment was done)
-						for(std::map<int, cv::Point3f>::iterator iter=points3DMap.begin(); iter!=points3DMap.end(); ++iter)
+						if(!bundleUpdateFeatureMapOnAllFrames_)
 						{
-							UASSERT(mapWords.count(iter->first) == 1);
-							//UDEBUG("Updated %d (%f,%f,%f) -> (%f,%f,%f)", iter->first, mapPoints[mapWords.find(iter->first)->second].x, mapPoints[mapWords.find(iter->first)->second].y, mapPoints[mapWords.find(iter->first)->second].z, iter->second.x, iter->second.y, iter->second.z);
-							mapPoints[mapWords.find(iter->first)->second] = iter->second;
+							// update local map 3D points (if bundle adjustment was done)
+							for(std::map<int, cv::Point3f>::iterator iter=points3DMap.begin(); iter!=points3DMap.end(); ++iter)
+							{
+								UASSERT(mapWords.count(iter->first) == 1);
+								mapPoints[mapWords.find(iter->first)->second] = iter->second;
+							}
 						}
 					}
 
@@ -679,6 +809,7 @@ Transform OdometryF2M::computeTransform(
 
 					if(!lastFrameModels.empty())
 					{
+						UASSERT(lastFrame_->getWordsKpts().size() == lastFrame_->getWords().size());
 						for(std::multimap<int, int>::const_iterator iter = lastFrame_->getWords().begin(); iter!=lastFrame_->getWords().end(); ++iter)
 						{
 							const cv::Point3f & pt = lastFrame_->getWords3()[iter->second];
@@ -733,7 +864,16 @@ Transform OdometryF2M::computeTransform(
 									}
 									else
 									{
-										bundleWordReferences_.find(iter->first)->second.insert(std::make_pair(lastFrame_->id(), FeatureBA(kpt, depth, cv::Mat(), cameraIndex)));
+										std::map<int, rtabmap::FeatureBA> & keyframes = bundleWordReferences_.find(iter->first)->second;
+										if(bundleMaxKeyFramesPerFeature_ != 0 && (int)keyframes.size() > bundleMaxKeyFramesPerFeature_)
+										{
+											// To keep number of keyframes looking at same feature bounded
+											int frameId = keyframes.rbegin()->first;
+											UASSERT(bundlePoseReferences_.find(frameId) != bundlePoseReferences_.end());
+											bundlePoseReferences_.at(frameId) -= 1;
+											keyframes.erase(frameId);
+										}
+										keyframes.insert(std::make_pair(lastFrame_->id(), FeatureBA(kpt, depth, cv::Mat(), cameraIndex)));
 									}
 								}
 							}
@@ -750,6 +890,28 @@ Transform OdometryF2M::computeTransform(
 						if(maxNewFeatures_ == 0  || added < maxNewFeatures_)
 						{
 							int cameraIndex = iter->second.second.second.second.second;
+							cv::Point3f pt = iter->second.second.second.first;
+							if(!util3d::isFinite(pt))
+							{
+								// get the ray instead
+								float x = iter->second.second.first.pt.x; //subImageWidth should be already removed
+								float y = iter->second.second.first.pt.y;
+								Eigen::Vector3f ray = util3d::projectDepthTo3DRay(
+										lastFrameModels[cameraIndex].imageSize(),
+										x,
+										y,
+										lastFrameModels[cameraIndex].cx(),
+										lastFrameModels[cameraIndex].cy(),
+										lastFrameModels[cameraIndex].fx(),
+										lastFrameModels[cameraIndex].fy());
+								float scaleInf = initDepthFactor_ * lastFrameModels[cameraIndex].fx();
+								pt = util3d::transformPoint(cv::Point3f(ray[0]*scaleInf, ray[1]*scaleInf, ray[2]*scaleInf), lastFrameModels[cameraIndex].localTransform()); // in base_link frame
+							}
+							if(floorThreshold_ != 0.0f && pt.z < floorThreshold_)
+							{
+								continue;
+							}
+
 							if(bundleAdjustment_>0)
 							{
 								if(lastFrame_->getWords().count(iter->second.first) == 1)
@@ -778,23 +940,6 @@ Transform OdometryF2M::computeTransform(
 
 							mapWords.insert(mapWords.end(), std::make_pair(iter->second.first, mapWords.size()));
 							mapWordsKpts.push_back(iter->second.second.first);
-							cv::Point3f pt = iter->second.second.second.first;
-							if(!util3d::isFinite(pt))
-							{
-								// get the ray instead
-								float x = iter->second.second.first.pt.x; //subImageWidth should be already removed
-								float y = iter->second.second.first.pt.y;
-								Eigen::Vector3f ray = util3d::projectDepthTo3DRay(
-										lastFrameModels[cameraIndex].imageSize(),
-										x,
-										y,
-										lastFrameModels[cameraIndex].cx(),
-										lastFrameModels[cameraIndex].cy(),
-										lastFrameModels[cameraIndex].fx(),
-										lastFrameModels[cameraIndex].fy());
-								float scaleInf = (0.05 * lastFrameModels[cameraIndex].fx()) / 0.01;
-								pt = util3d::transformPoint(cv::Point3f(ray[0]*scaleInf, ray[1]*scaleInf, ray[2]*scaleInf), lastFrameModels[cameraIndex].localTransform()); // in base_link frame
-							}
 							mapPoints.push_back(util3d::transformPoint(pt, newFramePose));
 							mapDescriptors.push_back(iter->second.second.second.second.first);
 							if(lastFrameOldestNewId_ > iter->second.first)
@@ -802,6 +947,10 @@ Transform OdometryF2M::computeTransform(
 								lastFrameOldestNewId_ = iter->second.first;
 							}
 							++added;
+						}
+						else
+						{
+							break;
 						}
 					}
 					UDEBUG("");
@@ -1125,6 +1274,12 @@ Transform OdometryF2M::computeTransform(
 
 					map_->setWords(mapWords, mapWordsKpts, mapPoints, mapDescriptors);
 				}
+
+				if(lastFrameWords3Updated)
+				{
+					// update output with refined 3d points from bundle adjustment
+					data.setFeatures(lastFrame_->getWordsKpts(), lastFrameWords3, lastFrame_->getWordsDescriptors());
+				}
 			}
 
 			if(info)
@@ -1314,6 +1469,25 @@ Transform OdometryF2M::computeTransform(
 						}
 					}
 
+					const int scanMaxPoints = lastFrame_->sensorData().laserScanRaw().maxPoints();
+					if(frameValid && scanMaxPoints > 0)
+					{
+						float correspondenceRatio = Parameters::defaultIcpCorrespondenceRatio();
+						Parameters::parse(parameters_, Parameters::kIcpCorrespondenceRatio(), correspondenceRatio);
+						if(float(lastFrame_->sensorData().laserScanRaw().size()) <
+								float(scanMaxPoints) * correspondenceRatio)
+						{
+							UWARN("Scan has %d points of the %d of a full sweep, under the %s=%f "
+									"that a registration against it would have to reach, so no "
+									"later scan could be matched to it. Not initializing on it.",
+									(int)lastFrame_->sensorData().laserScanRaw().size(),
+									scanMaxPoints,
+									Parameters::kIcpCorrespondenceRatio().c_str(),
+									correspondenceRatio);
+							frameValid = false;
+						}
+					}
+
 					if(frameValid)
 					{
 						if (scanMapMaxRange_ > 0 ){
@@ -1420,6 +1594,10 @@ Transform OdometryF2M::computeTransform(
 		else
 		{
 			info->reg = regInfo.copyWithoutData();
+		}
+		if(output.isNull())
+		{
+			info->reg.covariance = cv::Mat::eye(6,6,CV_64FC1)*9999.0; // Lost
 		}
 	}
 

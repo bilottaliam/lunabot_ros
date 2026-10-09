@@ -150,7 +150,8 @@ pcl::TextureMesh::Ptr RTABMAP_CORE_EXPORT createTextureMesh(
 		const std::vector<float> & roiRatios = std::vector<float>(), // [left, right, top, bottom] region of interest (in ratios) of the image projected.
 		const ProgressState * state = 0,
 		std::vector<std::map<int, pcl::PointXY> > * vertexToPixels = 0, // For each point, we have a list of cameras with corresponding pixel in it. Beware that the camera ids don't correspond to pose ids, they are indexes from 0 to total camera models and texture's materials.
-		bool distanceToCamPolicy = false);
+		bool distanceToCamPolicy = false,
+		int numThreads = 1); // number of threads used to compute the visible faces of the cameras (1=sequential)
 pcl::TextureMesh::Ptr RTABMAP_CORE_EXPORT createTextureMesh(
 		const pcl::PolygonMesh::Ptr & mesh,
 		const std::map<int, Transform> & poses,
@@ -163,7 +164,8 @@ pcl::TextureMesh::Ptr RTABMAP_CORE_EXPORT createTextureMesh(
 		const std::vector<float> & roiRatios = std::vector<float>(), // [left, right, top, bottom] region of interest (in ratios) of the image projected.
 		const ProgressState * state = 0,
 		std::vector<std::map<int, pcl::PointXY> > * vertexToPixels = 0, // For each point, we have a list of cameras with corresponding pixel in it. Beware that the camera ids don't correspond to pose ids, they are indexes from 0 to total camera models and texture's materials.
-		bool distanceToCamPolicy = false);
+		bool distanceToCamPolicy = false,
+		int numThreads = 1); // number of threads used to compute the visible faces of the cameras (1=sequential)
 
 /**
  * Remove not textured polygon clusters. If minClusterSize<0, only the largest cluster is kept.
@@ -225,6 +227,7 @@ cv::Mat RTABMAP_CORE_EXPORT mergeTextures(
 		bool exposureFusion = false,         //Exposure fusion can be used only with OpenCV3
 		const ProgressState * state = 0,
 		unsigned char blankValue = 255,      //Gray value for blank polygons (without texture)
+		bool clearVertexColorUnderTexture = true,
 		std::map<int, std::map<int, cv::Vec4d> > * gains = 0, // <Camera ID, Camera Sub Index (multi-cameras), gains Gray-R-G-B>
 		std::map<int, std::map<int, cv::Mat> > * blendingGains = 0, // <Camera ID, Camera Sub Index (multi-cameras), gains>
 		std::pair<float, float> * contrastValues = 0); // Alpha/beta contrast values
@@ -247,6 +250,7 @@ cv::Mat RTABMAP_CORE_EXPORT mergeTextures(
 		bool exposureFusion = false,         //Exposure fusion can be used only with OpenCV3
 		const ProgressState * state = 0,
 		unsigned char blankValue = 255,      //Gray value for blank polygons (without texture)
+		bool clearVertexColorUnderTexture = true,
 		std::map<int, std::map<int, cv::Vec4d> > * gains = 0, // <Camera ID, Camera Sub Index (multi-cameras), gains Gray-R-G-B>
 		std::map<int, std::map<int, cv::Mat> > * blendingGains = 0, // <Camera ID, Camera Sub Index (multi-cameras), gains>
 		std::pair<float, float> * contrastValues = 0); // Alpha/beta contrast values
@@ -277,7 +281,7 @@ RTABMAP_DEPRECATED bool RTABMAP_CORE_EXPORT multiBandTexturing(
  * @param cloud input Cloud of the mesh.
  * @param polygons Input polygons of the mesh.
  * @param cameraPoses Poses of the cameras.
- * @param vertexToPixels Output from {@link #createTextureMesh()}.
+ * @param vertexToPixels Output from `createTextureMesh()`.
  * @param images Images corresponding to cameraPoses, raw or compressed, can be empty if memory or dbDriver should be used.
  * @param cameraModels Camera calibrations corresponding to cameraPoses.
  * @param memory Should be set if images and dbDriver are not set.
@@ -393,35 +397,80 @@ pcl::PointCloud<pcl::Normal>::Ptr RTABMAP_CORE_EXPORT computeFastOrganizedNormal
 		float normalSmoothingSize = 10.0f,
 		const Eigen::Vector3f & viewPoint = Eigen::Vector3f(0,0,0));
 
+/**
+ * @defgroup ComputeNormalsComplexity Compute Structural Complexity of a Point Cloud with Normals
+ * @brief Computes the complexity of surface normals in a point cloud using PCA.
+ *
+ * This function performs a Principal Component Analysis (PCA) on the normals of a point cloud
+ * and returns a scalar measure of their spread (complexity). A low value indicates that normals
+ * are aligned (e.g., flat surface), while a high value indicates variation in orientation (e.g., curved or rough surface).
+ *
+ * If a transformation is provided, the normals are rotated accordingly before PCA. The result is normalized
+ * to lie between 0 and 1, where 0 represents minimal complexity (the normals are confined to a
+ * lower-dimensional subspace, e.g. a flat surface) and 1 represents maximal complexity (the normal
+ * directions are isotropic).
+ *
+ * @param cloud              The input point cloud or laser scan containing normals (pcl::PointNormal), or simply normals.
+ * @param t                  The transform to apply to the normals (only the rotation is used).
+ * @param is2d               Set to true if the data is 2D (normals will be analyzed in 2D space).
+ * @param pcaEigenVectors    (Optional) Output matrix containing the eigenvectors computed by PCA.
+ * @param pcaEigenValues     (Optional) Output matrix containing the eigenvalues computed by PCA.
+ * @param centered           When true (default), use covariance PCA (centered at mean).
+ *                           Use false for the uncentered second-moment matrix
+ *                           `M = (1/N) sum(n_i * n_i^T)`, which measures span of normal
+ *                           directions and correctly identifies degeneracy even when there
+ *                           are only N (rather than N+1) distinct viewpoint-flipped normal
+ *                           directions in N-D space.
+ *
+ * @return A float value between 0 and 1 representing the complexity of the normal distribution.
+ *         Returns 0 if not enough valid normals are available.
+ *
+ * @note Invalid normals (containing NaN or Inf) are automatically filtered out.
+ *       The result is the smallest eigenvalue (2nd in 2D, 3rd in 3D) scaled by the number of
+ *       dimensions (2 or 3), so that it is normalized against the unit-norm normals.
+ *
+ * @{
+ */
+/** @brief Computes the complexity of surface normals in a point cloud of type `LaserScan`. */
 float RTABMAP_CORE_EXPORT computeNormalsComplexity(
 		const LaserScan & scan,
 		const Transform & t = Transform::getIdentity(),
 		cv::Mat * pcaEigenVectors = 0,
-		cv::Mat * pcaEigenValues = 0);
+		cv::Mat * pcaEigenValues = 0,
+		bool centered = true);
+/** @brief Computes the complexity of surface normals in a point cloud of type `pcl::Normal`. */
 float RTABMAP_CORE_EXPORT computeNormalsComplexity(
 		const pcl::PointCloud<pcl::Normal> & normals,
 		const Transform & t = Transform::getIdentity(),
 		bool is2d = false,
 		cv::Mat * pcaEigenVectors = 0,
-		cv::Mat * pcaEigenValues = 0);
+		cv::Mat * pcaEigenValues = 0,
+		bool centered = true);
+/** @brief Computes the complexity of surface normals in a point cloud of type `pcl::PointNormal`. */
 float RTABMAP_CORE_EXPORT computeNormalsComplexity(
 		const pcl::PointCloud<pcl::PointNormal> & cloud,
 		const Transform & t = Transform::getIdentity(),
 		bool is2d = false,
 		cv::Mat * pcaEigenVectors = 0,
-		cv::Mat * pcaEigenValues = 0);
+		cv::Mat * pcaEigenValues = 0,
+		bool centered = true);
+/** @brief Computes the complexity of surface normals in a point cloud of type `pcl::PointXYZINormal`. */
 float RTABMAP_CORE_EXPORT computeNormalsComplexity(
 		const pcl::PointCloud<pcl::PointXYZINormal> & cloud,
 		const Transform & t = Transform::getIdentity(),
 		bool is2d = false,
 		cv::Mat * pcaEigenVectors = 0,
-		cv::Mat * pcaEigenValues = 0);
+		cv::Mat * pcaEigenValues = 0,
+		bool centered = true);
+/** @brief Computes the complexity of surface normals in a point cloud of type `pcl::PointXYZRGBNormal`. */
 float RTABMAP_CORE_EXPORT computeNormalsComplexity(
 		const pcl::PointCloud<pcl::PointXYZRGBNormal> & cloud,
 		const Transform & t = Transform::getIdentity(),
 		bool is2d = false,
 		cv::Mat * pcaEigenVectors = 0,
-		cv::Mat * pcaEigenValues = 0);
+		cv::Mat * pcaEigenValues = 0,
+		bool centered = true);
+/**@} */
 
 pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr RTABMAP_CORE_EXPORT mls(
 		const pcl::PointCloud<pcl::PointXYZRGB>::Ptr & cloud,
@@ -480,6 +529,22 @@ RTABMAP_DEPRECATED void RTABMAP_CORE_EXPORT adjustNormalsToViewPoint(
 void RTABMAP_CORE_EXPORT adjustNormalsToViewPoint(
 		pcl::PointCloud<pcl::PointXYZINormal>::Ptr & cloud,
 		const Eigen::Vector3f & viewpoint = Eigen::Vector3f(0,0,0),
+		float groundNormalsUp = 0.0f);
+
+void RTABMAP_CORE_EXPORT adjustNormalsToViewPoints(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		pcl::PointCloud<pcl::PointNormal>::Ptr & cloud,
+		float groundNormalsUp = 0.0f);
+void RTABMAP_CORE_EXPORT adjustNormalsToViewPoints(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr & cloud,
+		float groundNormalsUp = 0.0f);
+void RTABMAP_CORE_EXPORT adjustNormalsToViewPoints(
+		const std::map<int, Transform> & poses,
+		const std::vector<int> & cameraIndices,
+		pcl::PointCloud<pcl::PointXYZINormal>::Ptr & cloud,
 		float groundNormalsUp = 0.0f);
 
 void RTABMAP_CORE_EXPORT adjustNormalsToViewPoints(
@@ -570,6 +635,15 @@ bool intersectRayMesh(
 		Eigen::Vector3f & normal,
 		int & index);
 
+int RTABMAP_CORE_EXPORT saveOBJFile(
+	const std::string &file_name,
+    const pcl::TextureMesh &tex_mesh,
+	unsigned precision = 5);
+
+int RTABMAP_CORE_EXPORT saveOBJFile(
+	const std::string &file_name,
+	const pcl::PolygonMesh &mesh,
+	unsigned precision = 5);
 
 } // namespace util3d
 } // namespace rtabmap

@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/CameraRGBD.h>
 #include <rtabmap/core/CameraStereo.h>
 #include <rtabmap/core/Camera.h>
+#include <rtabmap/core/SensorEvent.h>
 #include <rtabmap/core/DBReader.h>
 #include <rtabmap/core/SensorCaptureThread.h>
 #include <rtabmap/core/SensorCaptureThread.h>
@@ -51,7 +52,8 @@ void showUsage()
 			"  after modifying Source settings.\n"
 			"Options:\n"
 			"  -debug    Show debug log.\n"
-			"  -hide     Don't display the current cloud recorded.\n");
+			"  -hide     Don't display the current cloud recorded.\n"
+			"  -ram      Record all frames in RAM before dumping on hard-drive on exit.\n");
 	exit(1);
 }
 
@@ -71,6 +73,31 @@ void sighandler(int sig)
 	}
 }
 
+// Detect when we reached end-of-files
+class StatusHandler: public UEventsHandler{
+protected:
+	virtual bool handleEvent(UEvent * event)
+	{
+		if(event->getClassName().compare("SensorEvent") == 0)
+		{
+			SensorEvent * camEvent = (SensorEvent*)event;
+			if(camEvent->getCode() == SensorEvent::kCodeNoMoreImages)
+			{
+				printf("End of stream reached...\n");
+				if(cam)
+				{
+					cam->join(true);
+				}
+				if(app)
+				{
+					QMetaObject::invokeMethod(app, "quit");
+				}
+			}
+		}
+		return false;
+	}
+};
+
 int main (int argc, char * argv[])
 {
 	ULogger::setType(ULogger::kTypeConsole);
@@ -79,6 +106,7 @@ int main (int argc, char * argv[])
 	// parse arguments
 	std::string fileName;
 	bool show = true;
+	bool recordInRAM = false;
 	std::string configFile;
 
 	if(argc < 3)
@@ -97,6 +125,11 @@ int main (int argc, char * argv[])
 			show = false;
 			continue;
 		}
+		if(strcmp(argv[i], "-ram") == 0)
+		{
+			recordInRAM = true;
+			continue;
+		}
 		printf("Unrecognized option : %s\n", argv[i]);
 		showUsage();
 	}
@@ -113,6 +146,7 @@ int main (int argc, char * argv[])
 
 	UINFO("Output = %s", fileName.c_str());
 	UINFO("Show = %s", show?"true":"false");
+	UINFO("RecordInRAM = %s", recordInRAM?"true":"false");
 	UINFO("Config = %s", configFile.c_str());
 
 	app = new QApplication(argc, argv);
@@ -137,6 +171,10 @@ int main (int argc, char * argv[])
 	signal(SIGABRT, &sighandler);
 	signal(SIGTERM, &sighandler);
 	signal(SIGINT, &sighandler);
+
+	// Catch end of stream to close the gui
+	StatusHandler statusHandler;
+	statusHandler.registerToEventsManager();
 
 	rtabmap::Camera * camera = dialog.createCamera();
 	if(camera == 0)
@@ -177,7 +215,7 @@ int main (int argc, char * argv[])
 
 	DataRecorder recorder;
 
-	if(recorder.init(fileName.c_str()))
+	if(recorder.init(fileName.c_str(), recordInRAM))
 	{
 		recorder.registerToEventsManager();
 		if(show)

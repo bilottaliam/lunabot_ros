@@ -185,6 +185,52 @@ Optimizer * Optimizer::create(Optimizer::Type type, const ParametersMap & parame
 	return optimizer;
 }
 
+class LinkIdKey
+{
+public:
+LinkIdKey(int id, Link::Type type) :
+		id_(id),
+		type_(type) {}
+	bool operator<(const LinkIdKey & k) const
+	{
+		// landmark, sort by smallest to largest landmark id, after normal links
+		if(id_ < 0 && k.id_ < 0)
+		{
+			return id_ > k.id_;
+		}
+		else if(id_ < 0) {
+			return false;
+		}
+		else if(k.id_ < 0) {
+			return true;
+		}
+
+		if(type_ == Link::kNeighbor && k.type_ != Link::kNeighbor)
+		{
+			return true;
+		}
+		else if(type_ != Link::kNeighbor && k.type_ == Link::kNeighbor)
+		{
+			return false;
+		}
+		else if(type_ == Link::kNeighborMerged && k.type_ != Link::kNeighbor && k.type_ != Link::kNeighborMerged)
+		{
+			return true;
+		}
+		else if(k.type_ == Link::kNeighborMerged && type_ != Link::kNeighbor && type_ != Link::kNeighborMerged)
+		{
+			return false;
+		}
+		else
+		{
+			// normal link, sort by smallest to largest id
+			return id_ < k.id_;
+		}
+	}
+	int id_;
+	Link::Type type_;
+};
+
 void Optimizer::getConnectedGraph(
 		int fromId,
 		const std::map<int, Transform> & posesIn,
@@ -194,13 +240,14 @@ void Optimizer::getConnectedGraph(
 {
 	UDEBUG("IN: fromId=%d poses=%d links=%d priorsIgnored=%d landmarksIgnored=%d", fromId, (int)posesIn.size(), (int)linksIn.size(), priorsIgnored()?1:0, landmarksIgnored()?1:0);
 	UASSERT(fromId>0);
-	UASSERT(uContains(posesIn, fromId));
+	UASSERT_MSG(uContains(posesIn, fromId), uFormat("poses=%ld (first=%d last=%d) fromId=%d",
+		posesIn.size(), posesIn.empty()?0:posesIn.begin()->first, posesIn.empty()?0:posesIn.rbegin()->first, fromId).c_str());
 
 	posesOut.clear();
 	linksOut.clear();
 
-	std::set<int> nextPoses;
-	nextPoses.insert(fromId);
+	std::map<LinkIdKey, Transform> nextPoses;
+	nextPoses.insert(std::make_pair(LinkIdKey(fromId, Link::kUndef), posesIn.find(fromId)->second));
 	std::multimap<int, std::pair<int, Link::Type> > biLinks;
 	for(std::multimap<int, Link>::const_iterator iter=linksIn.begin(); iter!=linksIn.end(); ++iter)
 	{
@@ -214,78 +261,73 @@ void Optimizer::getConnectedGraph(
 		}
 	}
 
-	while(nextPoses.size())
+	while(!nextPoses.empty())
 	{
-		int currentId = *nextPoses.rbegin(); // fill up all nodes before landmarks
-		nextPoses.erase(*nextPoses.rbegin());
+		// Fill up all nodes before landmarks
+		// For nodes, fill up all neightbor nodes before loop closure ones
+		int currentId = nextPoses.begin()->first.id_; 
+		Transform currentPose = nextPoses.begin()->second;
+		nextPoses.erase(nextPoses.begin());
 
-		if(posesOut.empty())
+		if(posesOut.find(currentId) != posesOut.end()) {
+			// Already added from priority list
+			continue;
+		}
+
+		posesOut.insert(std::make_pair(currentId, currentPose));
+
+		// add prior links
+		for(std::multimap<int, Link>::const_iterator pter=linksIn.lower_bound(currentId); pter!=linksIn.end() && pter->first==currentId; ++pter)
 		{
-			posesOut.insert(std::make_pair(currentId, posesIn.find(currentId)->second));
-
-			// add prior links
-			for(std::multimap<int, Link>::const_iterator pter=linksIn.find(currentId); pter!=linksIn.end() && pter->first==currentId; ++pter)
+			if(pter->second.from() == pter->second.to() && (!priorsIgnored() || pter->second.type() != Link::kPosePrior))
 			{
-				if(pter->second.from() == pter->second.to() && (!priorsIgnored() || pter->second.type() != Link::kPosePrior))
-				{
-					linksOut.insert(*pter);
-				}
+				linksOut.insert(*pter);
 			}
 		}
 
-		for(std::multimap<int, std::pair<int, Link::Type> >::const_iterator iter=biLinks.find(currentId); iter!=biLinks.end() && iter->first==currentId; ++iter)
+		for(std::multimap<int, std::pair<int, Link::Type> >::const_iterator iter=biLinks.lower_bound(currentId); iter!=biLinks.end() && iter->first==currentId; ++iter)
 		{
 			int toId = iter->second.first;
 			Link::Type type = iter->second.second;
 			if(posesIn.find(toId) != posesIn.end() && (!landmarksIgnored() || toId>0))
 			{
 				std::multimap<int, Link>::const_iterator kter = graph::findLink(linksIn, currentId, toId, true, type);
-				if(nextPoses.find(toId) == nextPoses.end())
+				UASSERT(kter!=linksIn.end());
+				if(!uContains(posesOut, toId))
 				{
-					if(!uContains(posesOut, toId))
+					const Transform & poseToIn = posesIn.at(toId);
+					Transform t = kter->second.from()==currentId?kter->second.transform():kter->second.transform().inverse();
+					Transform pose;
+					if(isSlam2d() && kter->second.type() == Link::kLandmark && toId>0 && (poseToIn.is3DoF() || poseToIn.is4DoF()))
 					{
-						const Transform & poseToIn = posesIn.at(toId);
-						Transform t = kter->second.from()==currentId?kter->second.transform():kter->second.transform().inverse();
-						if(isSlam2d() && kter->second.type() == Link::kLandmark && toId>0 && (poseToIn.is3DoF() || poseToIn.is4DoF()))
+						if(poseToIn.is3DoF())
 						{
-							if(poseToIn.is3DoF())
-							{
-								posesOut.insert(std::make_pair(toId, (posesOut.at(currentId) * t).to3DoF()));
-							}
-							else
-							{
-								posesOut.insert(std::make_pair(toId, (posesOut.at(currentId) * t).to4DoF()));
-							}
+							pose = (posesOut.at(currentId) * t).to3DoF();
 						}
 						else
 						{
-							posesOut.insert(std::make_pair(toId, posesOut.at(currentId)* t));
+							pose = (posesOut.at(currentId) * t).to4DoF();
 						}
-
-						// add prior links
-						for(std::multimap<int, Link>::const_iterator pter=linksIn.find(toId); pter!=linksIn.end() && pter->first==toId; ++pter)
-						{
-							if(pter->second.from() == pter->second.to() && (!priorsIgnored() || pter->second.type() != Link::kPosePrior))
-							{
-								linksOut.insert(*pter);
-							}
-						}
-
-						nextPoses.insert(toId);
+					}
+					else
+					{
+						pose = posesOut.at(currentId)* t;
 					}
 
-					// only add unique links
-					if(graph::findLink(linksOut, currentId, toId, true, kter->second.type()) == linksOut.end())
+					nextPoses.insert(std::make_pair(LinkIdKey(toId, type), pose));
+				}
+
+				// only add unique links
+				if(graph::findLink(linksOut, currentId, toId, true, kter->second.type()) == linksOut.end())
+				{
+					if(kter->second.to() < 0)
 					{
-						if(kter->second.to() < 0)
-						{
-							// For landmarks, make sure fromId is the landmark
-							linksOut.insert(std::make_pair(kter->second.to(), kter->second.inverse()));
-						}
-						else
-						{
-							linksOut.insert(*kter);
-						}
+						// For landmarks, make sure fromId is the landmark
+						linksOut.insert(std::make_pair(kter->second.to(), kter->second.inverse()));
+					}
+					else
+					{
+						linksOut.insert(*kter);
 					}
 				}
 			}
@@ -434,8 +476,12 @@ std::map<int, Transform> Optimizer::optimizeBA(
 		const std::map<int, std::vector<CameraModel> > & models,
 		std::map<int, cv::Point3f> & points3DMap,
 		const std::map<int, std::map<int, FeatureBA> > & wordReferences,
-		std::set<int> * outliers)
+		BAOutliers * outliers)
 {
+	if(outliers)
+	{
+		outliers->clear();
+	}
 	UERROR("Optimizer %d doesn't implement optimizeBA() method.", (int)this->type());
 	return std::map<int, Transform>();
 }
@@ -447,7 +493,8 @@ std::map<int, Transform> Optimizer::optimizeBA(
 		const std::map<int, Signature> & signatures,
 		std::map<int, cv::Point3f> & points3DMap,
 		std::map<int, std::map<int, FeatureBA> > & wordReferences,
-		bool rematchFeatures)
+		bool rematchFeatures,
+		const ParametersMap & registrationParameters)
 {
 	UDEBUG("");
 	std::map<int, std::vector<CameraModel> > multiModels;
@@ -497,7 +544,7 @@ std::map<int, Transform> Optimizer::optimizeBA(
 	}
 
 	// compute correspondences
-	this->computeBACorrespondences(poses, links, signatures, points3DMap, wordReferences, rematchFeatures);
+	this->computeBACorrespondences(poses, links, signatures, points3DMap, wordReferences, rematchFeatures, false, registrationParameters);
 
 	return optimizeBA(rootId, poses, links, multiModels, points3DMap, wordReferences);
 }
@@ -507,11 +554,12 @@ std::map<int, Transform> Optimizer::optimizeBA(
 		const std::map<int, Transform> & poses,
 		const std::multimap<int, Link> & links,
 		const std::map<int, Signature> & signatures,
-		bool rematchFeatures)
+		bool rematchFeatures,
+		const ParametersMap & registrationParameters)
 {
 	std::map<int, cv::Point3f> points3DMap;
 	std::map<int, std::map<int, FeatureBA> > wordReferences;
-	return optimizeBA(rootId, poses, links, signatures, points3DMap, wordReferences, rematchFeatures);
+	return optimizeBA(rootId, poses, links, signatures, points3DMap, wordReferences, rematchFeatures, registrationParameters);
 }
 
 Transform Optimizer::optimizeBA(
@@ -519,7 +567,7 @@ Transform Optimizer::optimizeBA(
 		const CameraModel & model,
 		std::map<int, cv::Point3f> & points3DMap,
 		const std::map<int, std::map<int, FeatureBA> > & wordReferences,
-		std::set<int> * outliers)
+		BAOutliers * outliers)
 {
 	std::map<int, Transform> poses;
 	poses.insert(std::make_pair(link.from(), Transform::getIdentity()));
@@ -556,11 +604,21 @@ void Optimizer::computeBACorrespondences(
 		const std::map<int, Signature> & signatures,
 		std::map<int, cv::Point3f> & points3DMap,
 		std::map<int, std::map<int, FeatureBA> > & wordReferences,
-		bool rematchFeatures)
+		bool rematchFeatures,
+		bool useLinkTransformAsGuess,
+		ParametersMap registrationParameters)
 {
 	UDEBUG("rematchFeatures=%d", rematchFeatures?1:0);
 	int wordCount = 0;
 	int edgeWithWordsAdded = 0;
+
+	// Some defaults if not provided
+	registrationParameters.insert(ParametersPair(Parameters::kVisEstimationType(), "1"));
+	registrationParameters.insert(ParametersPair(Parameters::kVisPnPReprojError(), "5"));
+	registrationParameters.insert(ParametersPair(Parameters::kVisMinInliers(), "6"));
+	registrationParameters.insert(ParametersPair(Parameters::kVisCorNNDR(), "0.6"));
+	RegistrationVis reg(registrationParameters);
+
 	std::map<int, std::map<cv::KeyPoint, int, KeyPointCompare> > frameToWordMap; // <FrameId, <Keypoint, wordId> >
 	for(std::multimap<int, Link>::const_iterator iter=links.lower_bound(1); iter!=links.end(); ++iter)
 	{
@@ -596,26 +654,25 @@ void Optimizer::computeBACorrespondences(
 					}
 				}
 
-				if(sFrom.getWords().size() &&
-					sTo.getWords().size() &&
+				if(sFrom.getWordsKpts().size() &&
+					sTo.getWordsKpts().size() &&
 					sFrom.getWords3().size())
 				{
-					ParametersMap regParam;
-					regParam.insert(ParametersPair(Parameters::kVisEstimationType(), "1"));
-					regParam.insert(ParametersPair(Parameters::kVisPnPReprojError(), "5"));
-					regParam.insert(ParametersPair(Parameters::kVisMinInliers(), "6"));
-					regParam.insert(ParametersPair(Parameters::kVisCorNNDR(), "0.6"));
-					RegistrationVis reg(regParam);
-
 					if(!rematchFeatures)
 					{
 						sFrom.setWordsDescriptors(cv::Mat());
 						sTo.setWordsDescriptors(cv::Mat());
 					}
+					else if(sFrom.getWordsDescriptors().empty() && sTo.getWordsDescriptors().empty())
+					{
+						UWARN("Rematching features is enabled but signatures (%d and %d) don't have word descriptors!? "
+							  "Features won't be rematched. If it is an old database, do rtabmap-reprocess "
+							  "so that signatures contain word desriptors.",
+							  sFrom.id(), sTo.id());
+					}
 
 					RegistrationInfo info;
-					Transform t = reg.computeTransformationMod(sFrom, sTo, Transform(), &info);
-					//Transform t = reg.computeTransformationMod(sFrom, sTo, iter->second.transform(), &info);
+					Transform t = reg.computeTransformationMod(sFrom, sTo, useLinkTransformAsGuess?iter->second.transform():Transform(), &info);
 					UDEBUG("%d->%d, inliers=%d",sFrom.id(), sTo.id(), (int)info.inliersIDs.size());
 
 					if(!t.isNull())
@@ -758,13 +815,13 @@ void Optimizer::computeBACorrespondences(
 					}
 					else
 					{
-						UWARN("Not enough inliers (%d) between %d and %d", info.inliersIDs.size(), sFrom.id(), sTo.id());
+						UWARN("Not enough inliers (%d) between %d and %d", (int)info.inliersIDs.size(), sFrom.id(), sTo.id());
 					}
 				}
 			}
 		}
 	}
-	UDEBUG("Added %d words (edges with words=%d/%d)", wordCount, edgeWithWordsAdded, links.size());
+	UDEBUG("Added %d words (edges with words=%d/%d)", wordCount, edgeWithWordsAdded, (int)links.size());
 	if(links.empty())
 	{
 		UERROR("No links found for BA?!");

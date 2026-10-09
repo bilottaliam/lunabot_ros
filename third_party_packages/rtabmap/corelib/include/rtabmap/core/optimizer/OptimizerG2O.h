@@ -42,6 +42,12 @@ public:
 	static bool isCholmodAvailable();
 
 public:
+	static bool loadGraph(
+			const std::string & fileName,
+			std::map<int, Transform> & poses,
+			std::multimap<int, Link> & edgeConstraints);
+
+public:
 	OptimizerG2O(const ParametersMap & parameters = ParametersMap());
 	virtual ~OptimizerG2O() {}
 
@@ -65,7 +71,7 @@ public:
 			const std::map<int, std::vector<CameraModel> > & models, // in case of stereo, Tx should be set
 			std::map<int, cv::Point3f> & points3DMap,
 			const std::map<int, std::map<int, FeatureBA> > & wordReferences, // <ID words, IDs frames + keypoint(x,y,depth)>
-			std::set<int> * outliers = 0);
+			BAOutliers * outliers = 0);
 
 	bool saveGraph(
 		const std::string & fileName,
@@ -76,6 +82,7 @@ private:
 	int solver_;
 	int optimizer_;
 	double pixelVariance_;
+	double disparityVariance_;
 	double robustKernelDelta_;
 	double baseline_;
 };
