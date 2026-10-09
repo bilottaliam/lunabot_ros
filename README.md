@@ -2,7 +2,7 @@
 
 # Project Overview
 
-This repository contains the software developed by the College of DuPage team for the NASA Lunabotics competition. It supports ROS 2 Jazzy on Ubuntu 24.04 (real robot only) and ROS 2 Humble on Ubuntu 22.04 (real robot and Gazebo Classic simulation) for x86-64 architecture. On 24.04 the simulation can run in a Humble Docker container, see [Simulation on Ubuntu 24.04](#simulation-on-ubuntu-2404-docker).
+This repository contains the software developed by the College of DuPage team for the NASA Lunabotics competition. It targets ROS 2 Lyrical on Ubuntu 26.04 with Gazebo Jetty simulation, for x86-64. The simulation can also run in a Lyrical Docker container on any Linux host, see [Simulation in Docker](#simulation-in-docker). See [MIGRATION.md](MIGRATION.md) for the move from Humble and Gazebo Classic.
 
 ## System Components
 
@@ -34,24 +34,17 @@ This repository contains the software developed by the College of DuPage team fo
 ## Installation
 
 **You will need to have already installed ROS 2 before continuing with installation.**
-- Jazzy (Ubuntu 24.04): [installation guide](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)
-- Humble (Ubuntu 22.04): [installation guide](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
+- Lyrical (Ubuntu 26.04): [installation guide](https://docs.ros.org/en/lyrical/Installation/Ubuntu-Install-Debs.html)
 
-Install both `ros-<distro>-desktop` and `ros-dev-tools`.
+Install `ros-lyrical-desktop` and `ros-dev-tools`. Gazebo Jetty comes in through `ros-lyrical-ros-gz`, which the dependency script installs.
 
 #### 1. (Optional) Append lines to .bashrc
 
-Appends the ROS 2 setup script to .bashrc so it runs in every new terminal. Fixes a VSCode terminal bug that causes a symbol lookup error (`unset GTK_PATH`). On Humble, also source the Gazebo setup script to prevent a startup crash.
+Appends the ROS 2 setup script to .bashrc so it runs in every new terminal. Fixes a VSCode terminal bug that causes a symbol lookup error (`unset GTK_PATH`).
 
 ```bash
-# Jazzy
 echo 'unset GTK_PATH' >> ~/.bashrc
-echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc
-
-# Humble (also add Gazebo)
-echo 'unset GTK_PATH' >> ~/.bashrc
-echo 'source /opt/ros/humble/setup.bash' >> ~/.bashrc
-echo 'source /usr/share/gazebo/setup.bash' >> ~/.bashrc
+echo 'source /opt/ros/lyrical/setup.bash' >> ~/.bashrc
 ```
 
 This will permanently append these lines to your .bashrc file, so there is no need to run it again. If you want to edit the file manually, use `nano ~/.bashrc`.
@@ -112,7 +105,7 @@ source install/setup.bash
 # Launch GUI in real robot mode (default)
 ros2 launch lunabot_bringup gui_launch.py
 
-# Launch GUI in simulation mode (ROS2 Humble only)
+# Launch GUI in simulation mode (Gazebo Jetty)
 ros2 launch lunabot_bringup gui_launch.py use_sim:=true
 ```
 
@@ -124,9 +117,9 @@ ros2 launch lunabot_bringup gui_launch.py use_sim:=true
   <img src="gui_view.png">
 </p>
 
-## Simulation on Ubuntu 24.04 (Docker)
+## Simulation in Docker
 
-Gazebo Classic is not available on 24.04, so the simulation runs in a ROS 2 Humble container built from [docker/Dockerfile](docker/Dockerfile). The container shares this workspace's `src` folder, so you edit and commit on the host as usual, and keeps its own `build` and `install` in a Docker volume.
+If your host is not Ubuntu 26.04, the simulation can run in a ROS 2 Lyrical container built from [docker/Dockerfile](docker/Dockerfile). The container shares this workspace's `src` folder, so you edit and commit on the host as usual, and keeps its own `build` and `install` in a Docker volume.
 
 #### 1. Install Docker (once)
 
@@ -157,7 +150,7 @@ source install/setup.bash
 ros2 launch lunabot_bringup gui_launch.py use_sim:=true
 ```
 
-Notes: the container shares the host network, so `ros2 topic list` on the host sees its topics. If Gazebo shows a black window, start with `LIBGL_ALWAYS_SOFTWARE=1 docker/run.sh`. You can remove the container's build with `docker volume rm lunabot_humble_ws`.
+Notes: the container shares the host network, so `ros2 topic list` on the host sees its topics. If Gazebo shows a black window, start with `LIBGL_ALWAYS_SOFTWARE=1 docker/run.sh`. You can remove the container's build with `docker volume rm lunabot_lyrical_ws`.
 
 ## Physical Robot Setup
 
