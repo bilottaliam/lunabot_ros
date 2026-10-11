@@ -2,6 +2,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.substitutions import Command, LaunchConfiguration, EqualsSubstitution
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -245,8 +246,11 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "robot_description": Command(
-                    ["xacro ", LaunchConfiguration("urdf_file"), " use_sim:=", LaunchConfiguration("use_sim")]
+                # value_type=str: otherwise launch_ros tries to parse the URDF as YAML and fails on any
+                # comment containing ": "
+                "robot_description": ParameterValue(
+                    Command(["xacro ", LaunchConfiguration("urdf_file"), " use_sim:=", LaunchConfiguration("use_sim")]),
+                    value_type=str,
                 ),
                 "use_sim_time": LaunchConfiguration("use_sim"),
             }
