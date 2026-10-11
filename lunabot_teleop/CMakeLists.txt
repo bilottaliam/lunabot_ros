@@ -28,7 +28,6 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(lunabot_msgs REQUIRED)
-find_package(Threads REQUIRED)  # sparkcan links Threads::Threads but does not find it
 # sparkcan exports Threads::Threads without finding it
 find_package(Threads REQUIRED)
 find_package(sparkcan REQUIRED)

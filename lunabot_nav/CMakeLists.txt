@@ -36,7 +36,6 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(Threads REQUIRED)  # sparkcan links Threads::Threads but does not find it
 # sparkcan exports Threads::Threads without finding it
 find_package(Threads REQUIRED)
 find_package(sparkcan REQUIRED)
