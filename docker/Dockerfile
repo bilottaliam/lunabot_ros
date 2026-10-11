@@ -27,32 +27,10 @@ RUN printf '%s\n' \
     '</fontconfig>' > /etc/fonts/local.conf \
     && fc-cache -f
 
-# SparkMax CAN library used by lunabot_teleop. The PPA has no resolute build, so build from source.
-RUN git clone --depth 1 https://github.com/grayson-arendt/sparkcan.git /tmp/sparkcan \
-    && cmake -S /tmp/sparkcan -B /tmp/sparkcan/build -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /tmp/sparkcan/build -j"$(nproc)" \
-    && cmake --install /tmp/sparkcan/build \
-    && rm -rf /tmp/sparkcan
-
-# libnabo + libpointmatcher for RTAB-Map ICP (Icp/Strategy 1). Not released for Lyrical.
-# Boost.System is header-only since Boost 1.89, so drop it from libpointmatcher's components.
-RUN git clone --depth 1 https://github.com/norlab-ulaval/libnabo.git /tmp/libnabo \
-    && cmake -S /tmp/libnabo -B /tmp/libnabo/build -DCMAKE_BUILD_TYPE=Release \
-       -DLIBNABO_BUILD_PYTHON=OFF -DLIBNABO_BUILD_TESTS=OFF -DLIBNABO_BUILD_EXAMPLES=OFF \
-    && cmake --build /tmp/libnabo/build -j"$(nproc)" && cmake --install /tmp/libnabo/build \
-    && git clone --depth 1 https://github.com/norlab-ulaval/libpointmatcher.git /tmp/libpointmatcher \
-    && sed -i 's/ system / /' /tmp/libpointmatcher/CMakeLists.txt /tmp/libpointmatcher/libpointmatcherConfig.cmake.in \
-    && cmake -S /tmp/libpointmatcher -B /tmp/libpointmatcher/build -DCMAKE_BUILD_TYPE=Release \
-       -DPOINTMATCHER_BUILD_EXAMPLES=OFF -DPOINTMATCHER_BUILD_EVALUATIONS=OFF -DBUILD_TESTS=OFF \
-    && cmake --build /tmp/libpointmatcher/build -j"$(nproc)" && cmake --install /tmp/libpointmatcher/build \
-    && ldconfig && rm -rf /tmp/libnabo /tmp/libpointmatcher
-
-# Livox SDK2, required by livox_ros_driver2. Its CMakeLists predates CMake 3.5, which CMake 4 rejects.
-RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-SDK2 \
-    && cmake -S /tmp/Livox-SDK2 -B /tmp/Livox-SDK2/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-    && cmake --build /tmp/Livox-SDK2/build -j"$(nproc)" \
-    && cmake --install /tmp/Livox-SDK2/build \
-    && rm -rf /tmp/Livox-SDK2
+# sparkcan, Livox SDK2, libnabo and libpointmatcher have no 26.04 / Lyrical packages: build
+# them from source at pinned commits (same script install_dependencies.sh uses)
+COPY scripts/install_source_deps.sh /tmp/install_source_deps.sh
+RUN /tmp/install_source_deps.sh /usr/local && rm /tmp/install_source_deps.sh
 
 # Workspace dependencies from the package.xml files. libpointmatcher (built above) and
 # velodyne (rtabmap_examples only) have no Lyrical release, so rosdep skips them.

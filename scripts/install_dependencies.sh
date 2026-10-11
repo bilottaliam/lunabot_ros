@@ -19,7 +19,7 @@ install_ros_dependencies() {
     cd "${WORKSPACE_DIR}"
     sudo rosdep init 2>/dev/null || true
     rosdep update
-    # libpointmatcher is built by install_pointmatcher; velodyne is only used by rtabmap_examples
+    # libpointmatcher is built by install_source_dependencies; velodyne is only used by rtabmap_examples
     rosdep install --from-paths src --ignore-src -r -y --skip-keys "libpointmatcher velodyne"
 }
 
@@ -35,45 +35,11 @@ install_git_dependencies() {
     git lfs pull
 }
 
-# Builds a CMake project from git and installs it to /usr/local
-build_from_source() {
-    local URL="$1" DIR="/tmp/$(basename "$1" .git)"; shift
-    sudo rm -rf "${DIR}"
-    git clone --depth 1 "${URL}" "${DIR}"
-    # CMake 4 (Ubuntu 26.04) rejects projects declaring a minimum below 3.5, e.g. Livox-SDK2
-    cmake -S "${DIR}" -B "${DIR}/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
-    cmake --build "${DIR}/build" -j"$(nproc)" || { echo "ERROR: ${URL} build failed."; exit 1; }
-    sudo cmake --install "${DIR}/build"
-    sudo ldconfig
-}
-
-install_sparkcan() {
-    echo -e "\n------------------------ Install sparkcan ------------------------ \n"
-    # The sparkcan PPA has no resolute build
-    build_from_source https://github.com/grayson-arendt/sparkcan.git
-}
-
-install_pointmatcher() {
-    echo -e "\n------------------------ Install libnabo and libpointmatcher ------------------------ \n"
-    # Used by RTAB-Map ICP (Icp/Strategy 1), not released for Lyrical
-    sudo apt install -y libboost-all-dev libyaml-cpp-dev
-    build_from_source https://github.com/norlab-ulaval/libnabo.git \
-        -DLIBNABO_BUILD_PYTHON=OFF -DLIBNABO_BUILD_TESTS=OFF -DLIBNABO_BUILD_EXAMPLES=OFF
-    # Boost.System is header-only since Boost 1.89
-    git clone --depth 1 https://github.com/norlab-ulaval/libpointmatcher.git /tmp/libpointmatcher_src
-    sed -i 's/ system / /' /tmp/libpointmatcher_src/CMakeLists.txt /tmp/libpointmatcher_src/libpointmatcherConfig.cmake.in
-    cmake -S /tmp/libpointmatcher_src -B /tmp/libpointmatcher_src/build -DCMAKE_BUILD_TYPE=Release \
-        -DPOINTMATCHER_BUILD_EXAMPLES=OFF -DPOINTMATCHER_BUILD_EVALUATIONS=OFF -DBUILD_TESTS=OFF
-    cmake --build /tmp/libpointmatcher_src/build -j"$(nproc)" || { echo "ERROR: libpointmatcher build failed."; exit 1; }
-    sudo cmake --install /tmp/libpointmatcher_src/build
-    sudo ldconfig
-    rm -rf /tmp/libpointmatcher_src
-}
-
-install_livox_sdk() {
-    echo -e "\n------------------------ Install Livox SDK2 ------------------------ \n"
-    build_from_source https://github.com/Livox-SDK/Livox-SDK2.git
-    echo "Livox SDK2 installed successfully"
+install_source_dependencies() {
+    echo -e "\n------------------------ Install sparkcan, Livox SDK2, libnabo, libpointmatcher ------------------------ \n"
+    # No 26.04 / Lyrical packages for these; built at pinned commits (same script as the Dockerfile)
+    sudo apt install -y build-essential cmake git libboost-all-dev libyaml-cpp-dev libeigen3-dev
+    "${WORKSPACE_DIR}/src/lunabot_ros/scripts/install_source_deps.sh" /usr/local || exit 1
 }
 
 install_gui_dependencies() {
@@ -84,9 +50,7 @@ install_gui_dependencies() {
 main() {
     install_camera_dependencies
     install_git_dependencies
-    install_sparkcan
-    install_pointmatcher
-    install_livox_sdk
+    install_source_dependencies
     install_gui_dependencies
     install_ros_dependencies
 }
