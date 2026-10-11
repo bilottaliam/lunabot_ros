@@ -18,16 +18,16 @@ This directory contains third-party ROS2 packages integrated directly into the r
 - **Description**: Point-LIO LiDAR-inertial odometry, publishes to `/lio_odom`
 - **Branch**: `grid_map_ros2` (commit `155f46d`)
 - **Original source**: https://github.com/LihanChen2004/Point-LIO
-- **Notes**: Modified for ROS2 Humble (`const SharedPtr` callbacks, C++17), added configurable `odom_frame_id`/`base_frame_id` params, TF publishing disabled, using UKF from robot_localization instead
+- **Notes**: Modified for ROS 2 (`const SharedPtr` callbacks, C++17), added configurable `odom_frame_id`/`base_frame_id` params, TF publishing disabled, using UKF from robot_localization instead
 
 ### rtabmap
 - **Description**: RTAB-Map core library for real-time SLAM
-- **Branch**: `0.21.9-humble`
+- **Branch**: `0.23.13-lyrical` (unmodified upstream copy)
 - **Original source**: https://github.com/introlab/rtabmap
 - **Notes**: Built with `-DRTABMAP_SYNC_MULTI_RGBD=ON` for dual-camera support
 
 ### rtabmap_ros
 - **Description**: ROS2 wrapper for RTAB-Map
-- **Branch**: `0.21.9-humble`
+- **Branch**: `0.23.13-lyrical` (unmodified upstream copy)
 - **Original source**: https://github.com/introlab/rtabmap_ros
 - **Notes**: Built with `-DRTABMAP_SYNC_MULTI_RGBD=ON` for dual-camera support

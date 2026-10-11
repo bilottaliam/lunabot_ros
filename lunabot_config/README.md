@@ -10,6 +10,7 @@ This package contains configuration files for Nav2 behavior trees, RViz2 configu
 - **gazebo**
   - **gazebo_v1_bot_params.yaml**: V1 robot joint controller parameters for Gazebo.
   - **gazebo_v2_bot_params.yaml**: V2 robot joint controller parameters for Gazebo.
+  - **ros_gz_bridge.yaml**: Gazebo ↔ ROS topic bridge for the simulated sensors and clock.
 - **mid360**
   - **mid360.json**: Livox Mid-360 LiDAR driver configuration.
 - **nav2**
