@@ -470,7 +470,7 @@
               <samples>360</samples>
               <resolution>1</resolution>
               <min_angle>-3.1415926</min_angle>
-              <max_angle>3.1415926</max_angle>
+              <max_angle>3.1241394</max_angle>  <!-- pi - 1 deg, so 360 samples don't repeat a column -->
             </horizontal>
             <vertical>
               <samples>32</samples>
@@ -501,18 +501,8 @@
         <visualize>true</visualize>
         <topic>livox/imu</topic>
         <gz_frame_id>mid360_imu_link</gz_frame_id>
-        <imu>
-          <angular_velocity>
-            <x><noise type="gaussian"><mean>0.0</mean><stddev>0.01</stddev></noise></x>
-            <y><noise type="gaussian"><mean>0.0</mean><stddev>0.01</stddev></noise></y>
-            <z><noise type="gaussian"><mean>0.0</mean><stddev>0.01</stddev></noise></z>
-          </angular_velocity>
-          <linear_acceleration>
-            <x><noise type="gaussian"><mean>0.0</mean><stddev>0.01</stddev></noise></x>
-            <y><noise type="gaussian"><mean>0.0</mean><stddev>0.01</stddev></noise></y>
-            <z><noise type="gaussian"><mean>0.0</mean><stddev>0.01</stddev></noise></z>
-          </linear_acceleration>
-        </imu>
+        <!-- Noiseless like the old sim: the Classic ROS 2 IMU plugin ignored <gaussianNoise>,
+             and the LIO *_sim.yaml configs were tuned on that -->
         <pose>0 0 0 0 0 0</pose>
       </sensor>
     </gazebo>

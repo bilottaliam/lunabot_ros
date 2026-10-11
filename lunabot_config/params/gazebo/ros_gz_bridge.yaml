@@ -5,7 +5,7 @@
   gz_type_name: gz.msgs.Clock
   direction: GZ_TO_ROS
 
-- ros_topic_name: /livox/lidar_points
+- ros_topic_name: /livox/lidar_PointCloud2  # same name the Classic Livox plugin used
   gz_topic_name: /livox/lidar_points/points
   ros_type_name: sensor_msgs/msg/PointCloud2
   gz_type_name: gz.msgs.PointCloudPacked
@@ -24,6 +24,13 @@
   direction: GZ_TO_ROS
 
 - ros_topic_name: /camera_front/color/camera_info
+  gz_topic_name: /camera_front/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+
+# rgbd_camera has one camera_info for color and depth; publish it under both names like the real camera
+- ros_topic_name: /camera_front/depth/camera_info
   gz_topic_name: /camera_front/camera_info
   ros_type_name: sensor_msgs/msg/CameraInfo
   gz_type_name: gz.msgs.CameraInfo
@@ -53,6 +60,13 @@
   gz_type_name: gz.msgs.CameraInfo
   direction: GZ_TO_ROS
 
+# rgbd_camera has one camera_info for color and depth; publish it under both names like the real camera
+- ros_topic_name: /camera_back/depth/camera_info
+  gz_topic_name: /camera_back/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+
 - ros_topic_name: /camera_back/depth/image_rect_raw
   gz_topic_name: /camera_back/depth_image
   ros_type_name: sensor_msgs/msg/Image
@@ -72,6 +86,13 @@
   direction: GZ_TO_ROS
 
 - ros_topic_name: /camera_fisheye/color/camera_info
+  gz_topic_name: /camera_fisheye/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+
+# rgbd_camera has one camera_info for color and depth; publish it under both names like the real camera
+- ros_topic_name: /camera_fisheye/depth/camera_info
   gz_topic_name: /camera_fisheye/camera_info
   ros_type_name: sensor_msgs/msg/CameraInfo
   gz_type_name: gz.msgs.CameraInfo

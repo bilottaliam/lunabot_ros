@@ -16,7 +16,7 @@ class PointCloudToLivox : public rclcpp::Node
 public:
   PointCloudToLivox() : Node("pointcloud_to_livox")
   {
-    std::string input_topic = declare_parameter<std::string>("input_topic", "/livox/lidar_points");
+    std::string input_topic = declare_parameter<std::string>("input_topic", "/livox/lidar_PointCloud2");
     std::string output_topic = declare_parameter<std::string>("output_topic", "/livox/lidar");
 
     pub_ = create_publisher<livox_ros_driver2::msg::CustomMsg>(output_topic, 20);

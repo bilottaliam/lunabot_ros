@@ -118,8 +118,9 @@ def create_sim_group(context, *args, **kwargs):
         parameters=[{"use_sim_time": True}],
     )
 
-    # One spawner activates every controller in a single switch. Switches only complete inside a
-    # sim step, so allow long timeouts for machines that run the sim far below real time.
+    # One spawner for all controllers (four parallel spawners contended for the controller manager).
+    # Controller switches only complete inside a sim step, so the long timeouts keep slow machines
+    # (sim far below real time) from giving up before the drive controller is active.
     controllers = ["joint_state_broadcaster", "diff_drive_controller", "camera_controller"]
     if context.launch_configurations.get("robot_type") == "v2_bot":
         controllers.append("position_controller")
