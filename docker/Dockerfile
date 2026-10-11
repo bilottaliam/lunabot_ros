@@ -47,9 +47,9 @@ RUN git clone --depth 1 https://github.com/norlab-ulaval/libnabo.git /tmp/libnab
     && cmake --build /tmp/libpointmatcher/build -j"$(nproc)" && cmake --install /tmp/libpointmatcher/build \
     && ldconfig && rm -rf /tmp/libnabo /tmp/libpointmatcher
 
-# Livox SDK2, required by livox_ros_driver2
+# Livox SDK2, required by livox_ros_driver2. Its CMakeLists predates CMake 3.5, which CMake 4 rejects.
 RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-SDK2 \
-    && cmake -S /tmp/Livox-SDK2 -B /tmp/Livox-SDK2/build \
+    && cmake -S /tmp/Livox-SDK2 -B /tmp/Livox-SDK2/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     && cmake --build /tmp/Livox-SDK2/build -j"$(nproc)" \
     && cmake --install /tmp/Livox-SDK2/build \
     && rm -rf /tmp/Livox-SDK2

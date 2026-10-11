@@ -40,7 +40,8 @@ build_from_source() {
     local URL="$1" DIR="/tmp/$(basename "$1" .git)"; shift
     sudo rm -rf "${DIR}"
     git clone --depth 1 "${URL}" "${DIR}"
-    cmake -S "${DIR}" -B "${DIR}/build" -DCMAKE_BUILD_TYPE=Release "$@"
+    # CMake 4 (Ubuntu 26.04) rejects projects declaring a minimum below 3.5, e.g. Livox-SDK2
+    cmake -S "${DIR}" -B "${DIR}/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
     cmake --build "${DIR}/build" -j"$(nproc)" || { echo "ERROR: ${URL} build failed."; exit 1; }
     sudo cmake --install "${DIR}/build"
     sudo ldconfig
