@@ -31,3 +31,9 @@ This directory contains third-party ROS2 packages integrated directly into the r
 - **Branch**: `0.23.13-lyrical` (unmodified upstream copy)
 - **Original source**: https://github.com/introlab/rtabmap_ros
 - **Notes**: Built with `-DRTABMAP_SYNC_MULTI_RGBD=ON` for dual-camera support
+
+### robot_upstart
+- **Description**: Installs ROS launch files as systemd services (used by `scripts/setup_robot_services.sh`)
+- **Branch**: `foxy-devel` (commit `211e84e`, released for Jazzy as 1.0.4)
+- **Original source**: https://github.com/clearpathrobotics/robot_upstart
+- **Notes**: Unmodified upstream copy. Vendored because it has no ROS 2 Lyrical release.

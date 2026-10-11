@@ -22,13 +22,11 @@ esac
 
 echo "Detected Ubuntu ${UBUNTU_CODENAME} - using ROS 2 ${ROS_DISTRO}"
 
-echo -e "\n------------------------ Install robot_upstart ------------------------ \n"
-apt list --installed 2>/dev/null | grep -q ros-${ROS_DISTRO}-robot-upstart
-if [ $? -ne 0 ]; then
-    echo "Installing ros-${ROS_DISTRO}-robot-upstart..."
-    apt install -y ros-${ROS_DISTRO}-robot-upstart
-else
-    echo "robot_upstart already installed"
+# robot_upstart has no Lyrical release; it is vendored in third_party_packages/robot_upstart and
+# built with the workspace (sourced below), so nothing to install here.
+if [ ! -d "${WORKSPACE_DIR}/install/robot_upstart" ]; then
+    echo "Error: robot_upstart not built. Build the workspace first (colcon build)."
+    exit 1
 fi
 
 echo -e "\n------------------------ Install CAN Setup Service ------------------------ \n"
