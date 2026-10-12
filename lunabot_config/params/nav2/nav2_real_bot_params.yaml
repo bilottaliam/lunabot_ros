@@ -14,9 +14,10 @@ bt_navigator:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
       plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
-    error_code_names:
-      - compute_path_error_code
-      - follow_path_error_code
+    # Lyrical replaced error_code_names (full names) with prefixes; same codes as before
+    error_code_name_prefixes:
+      - compute_path
+      - follow_path
 
 bt_navigator_navigate_through_poses_rclcpp_node:
   ros__parameters:

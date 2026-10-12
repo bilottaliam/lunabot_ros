@@ -236,7 +236,8 @@ into a user-local overlay. The build environment lives outside the repo, in `bui
 | GUI teleop | ✅ earlier session: WASD → `/cmd_vel` (QTest and by hand) after the xcb fix |
 | Point-LIO in sim | ✅ IMU init completes, `/lio_odom` publishes |
 | RTAB-Map in sim | ✅ publishes `map → odom` |
-| **Nav2 in sim** | ⚠️ **In progress.** Nav2 Lyrical config changes in `nav2_v1_bot_params.yaml` (sim only):<br>• Fixed: MPPI motion model is a plugin (`DiffDrive: plugin: "mppi::DiffDriveMotionModel"`).<br>• Fixed: `pkg/Class` plugin names → `pkg::Class` (bt_navigator, smac planner, behaviors).<br>• Next: bt_navigator "`error_code_names` has been replaced by `error_code_name_prefixes`". controller/planner/behavior servers now configure. Check script: `build_env/tools/nav2_config_check.sh true\|false`. |
+| Nav2 params on Lyrical | ✅ all four nodes configure with both `nav2_v1_bot_params.yaml` (sim) and `nav2_real_bot_params.yaml` (real robot), after three Lyrical changes:<br>• MPPI motion model is a plugin (`DiffDrive.plugin`).<br>• `pkg/Class` plugin names → `pkg::Class`.<br>• `error_code_names` → `error_code_name_prefixes`. **The real-robot file needed this last one too; without it Nav2 would not start on the robot.** |
+| Nav2 end-to-end in sim (NavigateToPose) | NAV_E2E_RESULT |
 | Docker image build | ⚠️ not possible here (no Docker) |
 
 Two problems in my own test tooling were found and fixed during this review; neither is in the repo:
@@ -245,8 +246,8 @@ Two problems in my own test tooling were found and fixed during this review; nei
 
 ## Still needs testing on the real robot
 
-1. **Nav2 params on Lyrical.** The sim params fail as above. `nav2_real_bot_params.yaml` uses other plugins and hasn't been
-   run on Lyrical; check that every Nav2 node reaches `active` before relying on autonomy.
+1. **Nav2 on the robot.** The real params now configure on Lyrical (checked without TF). Confirm every node reaches `active`
+   with the robot's TF and that RPP drives as before.
 2. Full boot checklist above: CAN up, launch-manager service, sensors at the expected rates, motors respond.
 3. sparkcan at commit `11d2d13` behaves like the PPA build the robot used before. Drive each motor at low duty first.
 4. Real-robot turning rate in autonomous mode (calibrate `wheel_base` in `controller_teleop.cpp` as described in
