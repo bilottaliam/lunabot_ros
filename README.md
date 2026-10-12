@@ -2,7 +2,7 @@
 
 # Project Overview
 
-This repository contains the software developed by the College of DuPage team for the NASA Lunabotics competition. It targets ROS 2 Lyrical on Ubuntu 26.04 with Gazebo Jetty simulation, for x86-64. The simulation can also run in a Lyrical Docker container on any Linux host, see [Simulation in Docker](#simulation-in-docker). See [MIGRATION.md](MIGRATION.md) for the move from Humble and Gazebo Classic.
+This repository contains the software developed by the College of DuPage team for the NASA Lunabotics competition. It targets ROS 2 Lyrical on Ubuntu 26.04 with Gazebo Jetty simulation, for x86-64. The simulation can also run in a Lyrical Docker container on any Linux host, see [Simulation in Docker](#simulation-in-docker). See [MIGRATION.md](MIGRATION.md) for the move from Humble and Gazebo Classic, and [REVIEW.md](REVIEW.md) for the audit of that upgrade (real-robot checklist, rotation fix).
 
 ## System Components
 

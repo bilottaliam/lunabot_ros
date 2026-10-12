@@ -22,17 +22,22 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
   `ros_gz_sim/gz_sim.launch.py` + `ros_gz_sim create`. `sim_gui:=false` runs `gz sim -s --headless-rendering` so the
   cameras and lidar still render. A `ros_gz_bridge` node is configured by
   `lunabot_config/params/gazebo/ros_gz_bridge.yaml` and bridges `/clock`, IMU, lidar and the three RGB-D cameras.
-  The ROS topic names are the same as before.
+  The ROS topic names are the same as before, including `/livox/lidar_PointCloud2` (the Classic Livox plugin's
+  PointCloud2) and `/camera_*/depth/camera_info`.
 - **URDF** (`v1_bot`, `v2_bot`):
   - `depth` + `libgazebo_ros_camera.so` → `rgbd_camera` sensors with `gz_frame_id` set to the same optical frames
-  - `libgazebo_ros_imu_sensor.so` → gz `imu` sensor with the same 0.01 gaussian noise
+  - Camera profiles now match the real robot (`hardware_launch.py`): D456 front/back 640×480 @ 15 Hz, fisheye 480×360 @ 5 Hz.
+    The old sim rendered all three at 640×360 @ 60 Hz, 4–12× the real frame rates, which was most of the sim's CPU cost.
+  - `libgazebo_ros_imu_sensor.so` → gz `imu` sensor, noiseless like before (the ROS 2 Classic plugin ignored
+    `<gaussianNoise>`, and the LIO `*_sim.yaml` configs were tuned on that)
   - `libgazebo_ros2_control.so` / `gazebo_ros2_control/GazeboSystem` → `gz_ros2_control-system` / `gz_ros2_control/GazeboSimSystem`
   - Removed the `Gazebo/Grey` material tags, which gz-sim ignores.
   - Wheel friction now uses the URDF `<gazebo>` extension tags `<mu1>/<mu2>/<kp>/<kd>`. The old `<mu>` and
     `<surface><ode>` children were never mapped by sdformat and were silently ignored. ODE `slip1/slip2` has no gz-sim
     equivalent and is dropped.
   - `ros2_control` command limits are now enforced. They were ignored under gazebo_ros2_control. Wheel velocity
-    limits went from ±1 rad/s (0.15 m/s, below what Nav2 and the GUI command) to ±10 rad/s, and bucket position limits from ±0.75 to the
+    limits went from ±1 rad/s (0.15 m/s, below what Nav2 and the GUI command) to ±15 rad/s (covers GUI teleop's maximum with the
+    skid-steer multiplier below), and bucket position limits from ±0.75 to the
     joint's real range [-1.57, 0.1], so the robot behaves as it did on Humble.
 - **Livox MID-360**: the vendored `livox_laser_simulation_RO2` plugin is Gazebo Classic only (it links `gazebo_dev`), and
   no gz-sim port exists. It is replaced by a `gpu_lidar` sensor (360 × 32 rays, same −0.126…0.964 rad vertical FOV and range)
@@ -52,7 +57,7 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
     `camera_controller` are now `forward_command_controller/ForwardCommandController` with `interface_name: position`.
     The `~/commands` topic and message type are unchanged, so the GUI needs no change.
   - Controllers no longer inherit the params file given to `gz_ros2_control`, so the spawner passes it with `--param-file`.
-  - A single spawner now activates all controllers, with 120 s switch and service timeouts. Switches only complete inside a
+  - One spawner now loads all controllers (instead of four in parallel), with 120 s switch and service timeouts. Switches only complete inside a
     sim step, so with the Gazebo GUI open on a slow machine (about 7% real-time factor on the test laptop) the default 5 s timeout
     failed and left the robot with no drive controller.
   - Removed `use_stamped_vel` (no longer a diff_drive parameter).
@@ -65,7 +70,7 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
 
 ### ROS 2 API changes
 - `ament_target_dependencies()` was removed in Lyrical. The CMake files of `lunabot_nav`, `lunabot_teleop`, `lunabot_util`, `fast_lio` and `point_lio`
-  now link `${<pkg>_TARGETS}` with `target_link_libraries`. `lunabot_teleop` was missing `find_package(ament_cmake)`, now added.
+  now link `${<pkg>_TARGETS}` with `target_link_libraries`. `lunabot_teleop` and `lunabot_nav` were missing `find_package(ament_cmake)`, now added.
 - The tf2 `.h` compatibility headers were removed, so includes now use `.hpp`.
 - `diff_drive_controller` only accepts `TwistStamped` on `~/cmd_vel` (`cmd_vel_unstamped` and `use_stamped_vel` are gone).
   `topic_remapper` now stamps `/cmd_vel` and publishes to `/diff_drive_controller/cmd_vel`. `/cmd_vel` itself stays
@@ -82,6 +87,7 @@ Sources: [ROS 2 Lyrical release announcement](https://discourse.openrobotics.org
 | `velodyne` | Not released | Only an `exec_depend` of `rtabmap_examples`, which this project doesn't use. Skipped in rosdep. |
 | `sparkcan` | PPA has no resolute build | Built from source (github.com/grayson-arendt/sparkcan). Its CMake config doesn't find Threads, so `find_package(Threads)` comes first. |
 | `livox_laser_simulation_RO2` | Gazebo Classic only | Replaced by `gpu_lidar` + `pointcloud_to_livox` (see above) |
+| `robot_upstart` (real-robot boot service) | Not released for Lyrical | Vendored in `third_party_packages/robot_upstart` (upstream `foxy-devel`, the branch Jazzy 1.0.4 was released from). `setup_robot_services.sh` uses the workspace copy instead of apt. |
 | `libgl1-mesa-glx` | Removed from Ubuntu | `libgl1` |
 
 ### Docker / scripts / docs
@@ -111,7 +117,7 @@ and sudo weren't available, so the missing ROS debs were extracted into a user-l
 | Both robots: xacro → `gz sdf -p` | ✅ 3 rgbd_camera, 1 gpu_lidar, 1 imu, gz_ros2_control plugin |
 | Headless sim (`gui_launch.py use_sim:=true sim_gui:=false`, v2_bot, artemis) | ✅ robot spawns |
 | Controllers | ✅ joint_state_broadcaster, diff_drive_controller, camera_controller, position_controller all `active` |
-| Topics | ✅ `/clock`, `/livox/imu`, `/livox/lidar_points`, `/livox/lidar` (~11k points per scan), all 3 cameras' color and depth, `/joint_states`, `/wheel_odom`, `/tf`, with correct `frame_id`s |
+| Topics | ✅ `/clock`, `/livox/imu`, `/livox/lidar_PointCloud2`, `/livox/lidar` (~11k points per scan), all 3 cameras' color and depth, `/joint_states`, `/wheel_odom`, `/tf`, with correct `frame_id`s |
 | Drive: `/cmd_vel` → `/wheel_odom` | ✅ x went from 0.0 to 0.39 m |
 | Same sim with the Gazebo GUI | ✅ launched and all controllers active (run by the user) |
 
