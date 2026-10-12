@@ -11,9 +11,9 @@ bt_navigator:
 
     navigators: ['navigate_to_pose', 'navigate_through_poses']
     navigate_to_pose:
-      plugin: "nav2_bt_navigator/NavigateToPoseNavigator"
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
-      plugin: "nav2_bt_navigator/NavigateThroughPosesNavigator"
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
 
     # plugin_lib_names is used to add custom BT plugins to the executor (vector of strings).
     # Built-in plugins are added automatically
@@ -68,6 +68,9 @@ controller_server:
       temperature: 0.3
       gamma: 0.015
       motion_model: "DiffDrive"
+      # Lyrical loads the motion model as a plugin named by motion_model
+      DiffDrive:
+        plugin: "mppi::DiffDriveMotionModel"
       visualize: false
       TrajectoryVisualizer:
         trajectory_step: 5
@@ -260,7 +263,7 @@ planner_server:
     use_sim_time: true
 
     GridBased:
-      plugin: "nav2_smac_planner/SmacPlanner2D"
+      plugin: "nav2_smac_planner::SmacPlanner2D"
       tolerance: 1.2
       downsample_costmap: false
       downsampling_factor: 1
@@ -284,15 +287,15 @@ behavior_server:
     cycle_frequency: 20.0
     behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
     spin:
-      plugin: "nav2_behaviors/Spin"
+      plugin: "nav2_behaviors::Spin"
     backup:
-      plugin: "nav2_behaviors/BackUp"
+      plugin: "nav2_behaviors::BackUp"
     drive_on_heading:
-      plugin: "nav2_behaviors/DriveOnHeading"
+      plugin: "nav2_behaviors::DriveOnHeading"
     wait:
-      plugin: "nav2_behaviors/Wait"
+      plugin: "nav2_behaviors::Wait"
     assisted_teleop:
-      plugin: "nav2_behaviors/AssistedTeleop"
+      plugin: "nav2_behaviors::AssistedTeleop"
     global_frame: odom
     robot_base_frame: base_link
     transform_tolerance: 1.0

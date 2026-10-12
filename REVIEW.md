@@ -236,7 +236,7 @@ into a user-local overlay. The build environment lives outside the repo, in `bui
 | GUI teleop | ✅ earlier session: WASD → `/cmd_vel` (QTest and by hand) after the xcb fix |
 | Point-LIO in sim | ✅ IMU init completes, `/lio_odom` publishes |
 | RTAB-Map in sim | ✅ publishes `map → odom` |
-| **Nav2 in sim** | ❌ **`controller_server` fails to configure:** "Can not get 'plugin' param value for MPPI.DiffDrive". Nav2 Lyrical loads the MPPI motion model as a plugin, so `motion_model: "DiffDrive"` in `nav2_v1_bot_params.yaml` (sim only) needs updating. Not fixed yet. Log: `build_env/nav2_failure.log`. |
+| **Nav2 in sim** | ⚠️ **In progress.** Nav2 Lyrical config changes in `nav2_v1_bot_params.yaml` (sim only):<br>• Fixed: MPPI motion model is a plugin (`DiffDrive: plugin: "mppi::DiffDriveMotionModel"`).<br>• Fixed: `pkg/Class` plugin names → `pkg::Class` (bt_navigator, smac planner, behaviors).<br>• Next: bt_navigator "`error_code_names` has been replaced by `error_code_name_prefixes`". controller/planner/behavior servers now configure. Check script: `build_env/tools/nav2_config_check.sh true\|false`. |
 | Docker image build | ⚠️ not possible here (no Docker) |
 
 Two problems in my own test tooling were found and fixed during this review; neither is in the repo:
