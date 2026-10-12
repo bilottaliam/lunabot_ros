@@ -370,13 +370,13 @@
     <gazebo reference="camera_front_link">
       <sensor type="rgbd_camera" name="camera_front">
         <pose>0 0 0 0 0 0</pose>
-        <update_rate>60.0</update_rate>
+        <update_rate>15</update_rate>  <!-- Same profile as the real D456 in hardware_launch.py (640x480 @ 15 Hz) -->
         <visualize>false</visualize>
         <camera>
           <horizontal_fov>1.540</horizontal_fov>
           <image>
             <width>640</width>
-            <height>360</height>
+            <height>480</height>
             <format>R8G8B8</format>
           </image>
           <distortion>
@@ -399,13 +399,13 @@
     <gazebo reference="camera_back_link">
       <sensor type="rgbd_camera" name="camera_back">
         <pose>0 0 0 0 0 0</pose>
-        <update_rate>60.0</update_rate>
+        <update_rate>15</update_rate>  <!-- Same profile as the real D456 in hardware_launch.py (640x480 @ 15 Hz) -->
         <visualize>false</visualize>
         <camera>
           <horizontal_fov>1.540</horizontal_fov>
           <image>
             <width>640</width>
-            <height>360</height>
+            <height>480</height>
             <format>R8G8B8</format>
           </image>
           <distortion>
@@ -428,12 +428,12 @@
     <gazebo reference="camera_fisheye_link">
       <sensor type="rgbd_camera" name="camera_fisheye">
         <pose>0 0 0 0 0 0</pose>
-        <update_rate>60.0</update_rate>
+        <update_rate>5</update_rate>  <!-- Same profile as the real webcam in hardware_launch.py -->
         <visualize>false</visualize>
         <camera>
           <horizontal_fov>2.1</horizontal_fov>
           <image>
-            <width>640</width>
+            <width>480</width>
             <height>360</height>
             <format>R8G8B8</format>
           </image>
