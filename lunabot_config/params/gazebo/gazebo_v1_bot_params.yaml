@@ -24,6 +24,10 @@ diff_drive_controller:
     right_wheel_names:
       ["base_front_right_wheel_joint", "base_rear_right_wheel_joint"]
     wheel_separation: 0.5
+    # Skid steer: the wheels scrub sideways when turning, so the robot only reaches ~61% of the
+    # commanded yaw rate with the geometric track. Effective track = 1.64 x 0.5 m, measured in the sim
+    # (see REVIEW.md). Corrects both the commanded wheel speeds and the odometry yaw.
+    wheel_separation_multiplier: 1.64
     wheel_radius: 0.1016  # matches the URDF wheel collision cylinder
     cmd_vel_timeout: 0.5
     publish_rate: 50.0
