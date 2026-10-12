@@ -19,7 +19,7 @@ selection of different global and local path planners.
               <Inverter>
                 <GlobalUpdatedGoal />
               </Inverter>
-              <IsPathValid path="{path}" />
+              <ValidatePath path="{path}" />  <!-- Lyrical: replaces the removed IsPathValid condition -->
             </ReactiveSequence>
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" />
           </Fallback>

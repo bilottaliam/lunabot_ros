@@ -10,6 +10,8 @@ the sim matches the real robot, and the slow rotation is found and fixed.
   CAN and udev setup, and the Livox config have no diff against `master`. The C++ changes are `tf2/*.h` → `.hpp` includes
   and CMake linking.
 - **Real-robot blockers that the upgrade introduced, now fixed:**
+  - Nav2 on Lyrical would not start on the robot: `error_code_names` was renamed to `error_code_name_prefixes`, and the
+    behavior tree used the removed `IsPathValid` node. Both are fixed, and Nav2 now completes a goal end to end in the sim.
   - `robot_upstart` has no Lyrical release, so `setup_robot_services.sh` couldn't install the boot service. It is now vendored.
   - The Dockerfile and `install_dependencies.sh` failed at the Livox-SDK2 build under CMake 4. They also built sparkcan
     (the motor library) from an unpinned upstream branch, and Docker couldn't see the new install script. All three are fixed.
@@ -237,7 +239,7 @@ into a user-local overlay. The build environment lives outside the repo, in `bui
 | Point-LIO in sim | ✅ IMU init completes, `/lio_odom` publishes |
 | RTAB-Map in sim | ✅ publishes `map → odom` |
 | Nav2 params on Lyrical | ✅ all four nodes configure with both `nav2_v1_bot_params.yaml` (sim) and `nav2_real_bot_params.yaml` (real robot), after three Lyrical changes:<br>• MPPI motion model is a plugin (`DiffDrive.plugin`).<br>• `pkg/Class` plugin names → `pkg::Class`.<br>• `error_code_names` → `error_code_name_prefixes`. **The real-robot file needed this last one too; without it Nav2 would not start on the robot.** |
-| Nav2 end-to-end in sim (NavigateToPose) | NAV_E2E_RESULT |
+| Nav2 end-to-end in sim (NavigateToPose) | ✅ sim → Point-LIO → RTAB-Map → Nav2: all four Nav2 nodes `active`; a goal 1 m ahead was accepted and **SUCCEEDED** (the robot drove 0.23 m by ground truth, which is within the sim params' unchanged `xy_goal_tolerance: 0.9`). This needed the behavior tree fix: `IsPathValid` was removed in Lyrical, so it became `ValidatePath` (same input and service) in the team's customized `nav_to_pose_...if_path_becomes_invalid.xml`. Without it bt_navigator would not start on the robot either. |
 | Docker image build | ⚠️ not possible here (no Docker) |
 
 Two problems in my own test tooling were found and fixed during this review; neither is in the repo:
@@ -246,8 +248,8 @@ Two problems in my own test tooling were found and fixed during this review; nei
 
 ## Still needs testing on the real robot
 
-1. **Nav2 on the robot.** The real params now configure on Lyrical (checked without TF). Confirm every node reaches `active`
-   with the robot's TF and that RPP drives as before.
+1. **Nav2 on the robot.** The real params configure on Lyrical (checked without TF), and the shared behavior tree now loads
+   (verified end to end in the sim). Confirm every node reaches `active` with the robot's TF and that RPP drives as before.
 2. Full boot checklist above: CAN up, launch-manager service, sensors at the expected rates, motors respond.
 3. sparkcan at commit `11d2d13` behaves like the PPA build the robot used before. Drive each motor at low duty first.
 4. Real-robot turning rate in autonomous mode (calibrate `wheel_base` in `controller_teleop.cpp` as described in
