@@ -17,6 +17,7 @@
   <depend>imu_complementary_filter</depend>
   <depend>laser_filters</depend>
   <depend>foxglove_bridge</depend>
+  <exec_depend>apriltag_ros</exec_depend>
   <depend>ros2_control</depend>
   <depend>ros2_controllers</depend>
   <depend>ros_gz_sim</depend>
