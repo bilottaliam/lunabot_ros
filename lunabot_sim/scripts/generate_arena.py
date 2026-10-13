@@ -27,16 +27,19 @@ BERM_CENTER, BERM_SIZE = (5.38, 0.9), (2.2, 0.9)
 COLUMN_CENTER, COLUMN_SIZE = (3.6, 2.65), 0.45
 BOULDER_D, CRATER_D = (0.30, 0.40), (0.40, 0.50)
 
-# Robot footprint (nav2 params): x from -0.3 to 0.6, y +-0.4 about base_link
-FOOTPRINT = np.array([[0.6, 0.4], [0.6, -0.4], [-0.3, -0.4], [-0.3, 0.4]])
+# Robot footprint about base_link, as in nav2_real_bot_params.yaml: the rear (-0.45) includes the fisheye
+# mast (mount x = -0.34 m), which sticks out past the chassis.
+FOOTPRINT = np.array([[0.6, 0.41], [0.6, -0.41], [-0.45, -0.41], [-0.45, 0.41]])
 HEADINGS = {"east": 0.0, "north": math.pi / 2, "west": math.pi, "south": -math.pi / 2}
 
 # AprilTag 36h11 on the starting-zone frame (the 2 allowed sides). size = black-border edge.
 TAG_SIZE = 0.25
 TAG_Z = 0.40
-TAGS = [  # id, x, y, yaw of the tag's outward normal (into the arena)
-    (0, 0.6, -0.02, math.pi / 2), (1, 1.4, -0.02, math.pi / 2),
-    (2, -0.02, 0.6, 0.0), (3, -0.02, 1.4, 0.0),
+TAGS = [  # id, x, y, yaw of the tag's outward normal (into the arena). Spread to the ends of each
+    # 2 m side: the yaw error of the fit (and so the error at the berm, 5 m away) scales with 1/baseline.
+    # On the wall face behind the 17 cm ducts, where the starting-zone frame (80/20) is.
+    (0, 0.25, -0.12, math.pi / 2), (1, 1.75, -0.12, math.pi / 2),
+    (2, -0.12, 0.25, 0.0), (3, -0.12, 1.75, 0.0),
 ]
 
 
@@ -113,7 +116,7 @@ def random_start(rng, heading=None):
     yaw = HEADINGS[heading] if heading else HEADINGS[rng.choice(list(HEADINGS))]
     c, s = math.cos(yaw), math.sin(yaw)
     pts = FOOTPRINT @ np.array([[c, s], [-s, c]])
-    lo, hi = -pts.min(axis=0) + 0.05, 2.0 - pts.max(axis=0) - 0.05
+    lo, hi = -pts.min(axis=0) + 0.15, 2.0 - pts.max(axis=0) - 0.15   # judges won't place it touching a wall
     x, y = rng.uniform(lo[0], hi[0]), rng.uniform(lo[1], hi[1])
     return {"x": round(x, 3), "y": round(y, 3), "yaw": yaw,
             "heading": [k for k, v in HEADINGS.items() if v == yaw][0]}
@@ -197,8 +200,8 @@ def world_sdf(gt, out):
     m.append(box("column", cx, cy, 1.0, COLUMN_SIZE, COLUMN_SIZE, 2.4, "0.6 0.2 0.2 1"))
     # Starting-zone frame (80/20 rails) on its two wall sides, and the zone/berm markings (visual only)
     for i, z in enumerate((0.22, 0.58)):
-        m.append(box(f"frame_s{i}", 1.0, -0.04, z, 2.0, 0.04, 0.04, "0.75 0.75 0.78 1"))
-        m.append(box(f"frame_w{i}", -0.04, 1.0, z, 0.04, 2.0, 0.04, "0.75 0.75 0.78 1"))
+        m.append(box(f"frame_s{i}", 1.0, -DUCT_D + 0.02, z, 2.0, 0.04, 0.04, "0.75 0.75 0.78 1"))
+        m.append(box(f"frame_w{i}", -DUCT_D + 0.02, 1.0, z, 0.04, 2.0, 0.04, "0.75 0.75 0.78 1"))
     for name, (x0, y0, x1, y1), rgba in [
         ("mark_start", START_ZONE, "0.2 0.8 0.2 1"), ("mark_construction", CONSTRUCTION, "0.9 0.9 0.2 1"),
         ("mark_berm", (BERM_CENTER[0] - 1.1, BERM_CENTER[1] - 0.45, BERM_CENTER[0] + 1.1, BERM_CENTER[1] + 0.45), "0.9 0.1 0.1 1"),
@@ -213,7 +216,9 @@ def world_sdf(gt, out):
     <model name='tag_{t_['id']}'><static>true</static>
       <pose>{t_['x']} {t_['y']} {t_['z']} {math.pi / 2} 0 {t_['yaw'] + math.pi / 2}</pose>
       <link name='link'><visual name='v'><geometry><box><size>{s} {s} 0.003</size></box></geometry>
-        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>{tex}</albedo_map></metal></pbr></material>
+        <!-- emissive: the sun is the only light and grazes vertical walls; a print under arena lights is not that dim -->
+        <material><diffuse>1 1 1 1</diffuse><emissive>0.6 0.6 0.6 1</emissive>
+          <pbr><metal><albedo_map>{tex}</albedo_map><emissive_map>{tex}</emissive_map></metal></pbr></material>
       </visual></link></model>""")
     for i, o in enumerate(gt["obstacles"]):
         if o["kind"] != "boulder":
