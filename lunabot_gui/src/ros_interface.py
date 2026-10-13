@@ -15,7 +15,8 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import CompressedImage, JointState
-from std_msgs.msg import Bool, Float32, Float64, Float64MultiArray
+from std_msgs.msg import Bool, Float32, Float64, Float64MultiArray, String
+from types import SimpleNamespace
 
 from lunabot_logger import Logger
 from lunabot_msgs.action import Depositing, Excavation
@@ -43,6 +44,7 @@ _DISPLAY_NAMES = {
     'mapping':      'RTAB-Map',
     'nav2':         'Navigation2',
     'hardware':     'Hardware',
+    'autonomy':     'Autonomy (mission executive)',
 }
 
 class RobotInterface:
@@ -129,7 +131,8 @@ class RobotInterface:
             'actions': None,
             'pointlio': None,
             'mapping': None,
-            'nav2': None
+            'nav2': None,
+            'autonomy': None,
         }
         
         self.excavation_client = ActionClient(self.node, Excavation, 'auto_excavation_action')
@@ -145,6 +148,8 @@ class RobotInterface:
         self.camera_cmd_pub = self.node.create_publisher(Float64MultiArray, '/camera_controller/commands', 10)
         self.cmd_vel_pub = self.node.create_publisher(Twist, '/cmd_vel', 10)
         self.excavation_angle_pub = self.node.create_publisher(Float64, '/excavation_angle', 10)
+        # Actions don't cross the MCC link (foxglove_bridge); on the real robot mcc_gateway runs them
+        self.mission_command_pub = self.node.create_publisher(String, '/mission/command', 10)
         
         self.launch_client = self.node.create_client(LaunchSystem, 'launch_system')
         self.stop_client = self.node.create_client(StopSystem, 'stop_system')
@@ -581,8 +586,9 @@ class RobotInterface:
                 if system_name == 'nav2':
                     launch_file = 'nav2_stack_launch.py'
 
+                extra = ['start_mission:=true'] if system_name == 'autonomy' else []
                 self.launch_processes[system_name] = subprocess.Popen(
-                    ['ros2', 'launch', 'lunabot_bringup', launch_file, f'use_sim:={use_sim_arg}'],
+                    ['ros2', 'launch', 'lunabot_bringup', launch_file, f'use_sim:={use_sim_arg}'] + extra,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     start_new_session=True
                 )
@@ -665,6 +671,10 @@ class RobotInterface:
     
     def send_excavate_goal(self, response_callback, result_callback, cancel_callback):
         self.log.action('Sending excavation goal')
+        if self.is_remote:
+            self.mission_command_pub.publish(String(data='excavate'))
+            response_callback(SimpleNamespace(accepted=True))
+            return None
         goal_msg = Excavation.Goal()
         send_goal_future = self.excavation_client.send_goal_async(goal_msg)
         send_goal_future.add_done_callback(
@@ -680,6 +690,10 @@ class RobotInterface:
             get_result_future.add_done_callback(result_callback)
     
     def cancel_excavate_goal(self, cancel_callback):
+        if self.is_remote:
+            self.mission_command_pub.publish(String(data='cancel'))
+            cancel_callback(None)
+            return
         if self.excavation_goal_handle is not None and self.excavation_goal_handle.accepted:
             self.log.action('Canceling excavation goal')
             cancel_future = self.excavation_goal_handle.cancel_goal_async()
@@ -690,6 +704,10 @@ class RobotInterface:
     
     def send_deposit_goal(self, response_callback, result_callback, cancel_callback):
         self.log.action('Sending depositing goal')
+        if self.is_remote:
+            self.mission_command_pub.publish(String(data='dump'))
+            response_callback(SimpleNamespace(accepted=True))
+            return None
         goal_msg = Depositing.Goal()
         send_goal_future = self.depositing_client.send_goal_async(goal_msg)
         send_goal_future.add_done_callback(
@@ -705,6 +723,10 @@ class RobotInterface:
             get_result_future.add_done_callback(result_callback)
     
     def cancel_deposit_goal(self, cancel_callback):
+        if self.is_remote:
+            self.mission_command_pub.publish(String(data='cancel'))
+            cancel_callback(None)
+            return
         if self.depositing_goal_handle is not None and self.depositing_goal_handle.accepted:
             self.log.action('Canceling depositing goal')
             cancel_future = self.depositing_goal_handle.cancel_goal_async()
@@ -714,27 +736,13 @@ class RobotInterface:
             cancel_callback(None)
     
     def launch_navigation_client(self):
-        self.log.action('Starting navigation client')
-        try:
-            use_sim_arg = 'false' if self.is_real_mode else 'true'
-            self.navigation_client_process = subprocess.Popen(
-                f'{self._get_workspace_setup_cmd()} && ros2 run lunabot_nav navigation_client'
-                f' --ros-args -p use_sim_time:={use_sim_arg}',
-                shell=True, executable='/bin/bash', preexec_fn=os.setsid)
-            self.log.success('Navigation client launched')
-            return True
-        except Exception as e:
-            self.log.failure(f'Failed to launch navigation client: {e}')
-            return False
-    
+        """Full autonomy: the mission executive (+ tag localization, terrain mapping) on the robot."""
+        self.launch_system('autonomy')
+        return self.launch_processes['autonomy'] is not None
+
     def stop_navigation_client(self):
-        if self.navigation_client_process:
-            try:
-                os.killpg(os.getpgid(self.navigation_client_process.pid), signal.SIGTERM)
-                self.navigation_client_process = None
-                self.log.success('Navigation client stopped')
-            except Exception as e:
-                self.log.failure(f'Failed to stop navigation client: {e}')
+        if self.launch_processes['autonomy'] is not None:
+            self.stop_system('autonomy')
     
     def shutdown(self):
         if self._shutdown:

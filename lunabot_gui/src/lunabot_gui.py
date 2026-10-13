@@ -13,6 +13,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 
+import mcc_panel
 import ui_widgets
 from gui_styles import (Colors, MAIN_STYLESHEET, Styles,
                         ACTION_BTN_CSS, ACTION_BTN_ACTIVE_CSS, ACTION_BTN_DISABLED_CSS,
@@ -92,6 +93,7 @@ class LunabotGUI(QMainWindow):
         self.robot.on_robot_state_update = self._queue_robot_state_update
         self.robot.on_control_state_update = self._queue_control_state_update
         self.robot.on_log = self._queue_log
+        self.mcc = mcc_panel.MccState(self.robot.node)
 
         self.sidebar_collapsed = False
         self.fisheye_camera_position = 0.0
@@ -129,6 +131,14 @@ class LunabotGUI(QMainWindow):
         self.camera_timer = QTimer()
         self.camera_timer.timeout.connect(self.update_cameras)
         self.camera_timer.start(CAMERA_UPDATE_INTERVAL_MS)
+
+        self.mcc_timer = QTimer()
+        self.mcc_timer.timeout.connect(self.update_mcc)
+        self.mcc_timer.start(1000)
+
+    def update_mcc(self):
+        self.map_view.render()
+        self.autonomy_panel.refresh()
 
     def _queue_robot_state_update(self):
         self._log_queue.put(('robot_state', None))
@@ -244,6 +254,14 @@ class LunabotGUI(QMainWindow):
         fisheye_layout.addWidget(self.swap_fisheye_btn)
 
         row_layout.addWidget(fisheye_container)
+
+        map_group = QGroupBox("Arena: map, detected obstacles, planned path")
+        map_layout = QVBoxLayout()
+        map_layout.setContentsMargins(4, 4, 4, 4)
+        self.map_view = mcc_panel.MapView(self.mcc)
+        map_layout.addWidget(self.map_view)
+        map_group.setLayout(map_layout)
+        row_layout.addWidget(map_group, 1)
         return row
 
     def create_bottom_row(self):
@@ -320,6 +338,8 @@ class LunabotGUI(QMainWindow):
         sidebar_layout.setSpacing(6)
         self.sidebar_widget.setLayout(sidebar_layout)
 
+        self.autonomy_panel = mcc_panel.AutonomyPanel(self.mcc, self.robot, self._queue_log)
+        sidebar_layout.addWidget(self.autonomy_panel)
         sidebar_layout.addWidget(ui_widgets.create_controls_reference_group(self))
         sidebar_layout.addWidget(ui_widgets.create_excavation_angle_group(self))
         sidebar_layout.addWidget(ui_widgets.create_hardware_group(self))
@@ -597,7 +617,7 @@ class LunabotGUI(QMainWindow):
             if self.full_auto_active:
                 self.robot.stop_navigation_client()
                 self.full_auto_active = False
-                self.auto_btn.setText("One Cycle Auto")
+                self.auto_btn.setText("Full Autonomy")
                 self.auto_btn.setStyleSheet(ACTION_BTN_CSS)
             self.emergency_stopped = True
             self.emergency_stop_btn.setText("Re-Enable Robot")
@@ -625,9 +645,9 @@ class LunabotGUI(QMainWindow):
             self.robot.node.get_logger().info('Stopping one cycle auto')
             self.robot.stop_navigation_client()
             self.full_auto_active = False
-            self.auto_btn.setText("One Cycle Auto")
+            self.auto_btn.setText("Full Autonomy")
             self.auto_btn.setStyleSheet(ACTION_BTN_CSS)
-            self._set_operation_status("Status: One Cycle Auto Stopped", 'warning')
+            self._set_operation_status("Status: Full Autonomy Stopped", 'warning')
             return
 
         if self.robot.is_excavating or self.robot.is_depositing:
@@ -636,13 +656,13 @@ class LunabotGUI(QMainWindow):
 
         self.robot.node.get_logger().info('Starting one cycle auto')
         self.full_auto_active = True
-        self.auto_btn.setText("Stop One Cycle Auto")
+        self.auto_btn.setText("Stop Full Autonomy")
         self.auto_btn.setStyleSheet(ACTION_BTN_ACTIVE_CSS)
-        self._set_operation_status("Status: One Cycle Auto Active...", 'warning')
+        self._set_operation_status("Status: Full Autonomy Active...", 'warning')
 
         if not self.robot.launch_navigation_client():
             self.full_auto_active = False
-            self.auto_btn.setText("One Cycle Auto")
+            self.auto_btn.setText("Full Autonomy")
             self.auto_btn.setStyleSheet(ACTION_BTN_CSS)
             self._set_operation_status("Status: Failed to start", 'error')
 
@@ -735,7 +755,7 @@ class LunabotGUI(QMainWindow):
 
         current_status = self.operation_status_label.text()
         preserve = any(keyword in current_status for keyword in [
-            "Excavating", "Depositing", "One Cycle Auto Active", "Navigating"
+            "Excavating", "Depositing", "Full Autonomy Active", "Navigating"
         ])
 
         if self.robot.robot_disabled:

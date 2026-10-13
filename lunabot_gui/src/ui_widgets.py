@@ -492,7 +492,7 @@ def create_action_control_group(app):
     action_btns = [
         ('excavate_btn', 'Excavate',       app.send_excavate_goal),
         ('deposit_btn',  'Deposit',         app.send_deposit_goal),
-        ('auto_btn',     'One Cycle Auto',  app.send_full_auto_goal),
+        ('auto_btn',     'Full Autonomy',   app.send_full_auto_goal),
     ]
     for attr, text, slot in action_btns:
         btn = _action_btn(text, slot)

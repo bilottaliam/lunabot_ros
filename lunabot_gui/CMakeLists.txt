@@ -29,7 +29,8 @@ install(
   DESTINATION lib/${PROJECT_NAME}
   RENAME lunabot_gui)
 
-install(FILES src/gui_styles.py src/ros_interface.py src/ui_widgets.py
+install(PROGRAMS src/mcc_relay.py DESTINATION lib/${PROJECT_NAME})
+install(FILES src/gui_styles.py src/ros_interface.py src/ui_widgets.py src/mcc_panel.py
         DESTINATION lib/${PROJECT_NAME})
 
 install(

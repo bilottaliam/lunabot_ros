@@ -47,6 +47,7 @@ install(TARGETS topic_remapper livox_reorient pointcloud_to_livox DESTINATION li
 install(PROGRAMS src/bandwidth_monitor.py src/image_compressor.py
                  src/power_monitor.py src/fisheye_rotation.py
                  src/fisheye_camera.py src/encoder_reader.py
+                 src/mcc_gateway.py
                  DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)

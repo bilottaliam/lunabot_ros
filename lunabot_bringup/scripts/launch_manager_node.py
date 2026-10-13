@@ -30,7 +30,8 @@ class LaunchManagerNode(Node):
             'pointlio': None,
             'mapping': None,
             'nav2': None,
-            'hardware': None
+            'hardware': None,
+            'autonomy': None,
         }
 
         self.workspace = os.environ.get('AMENT_PREFIX_PATH', '').split(':')[0]
@@ -120,7 +121,8 @@ class LaunchManagerNode(Node):
         launch_files = {
             'pointlio': 'pointlio_launch.py',
             'mapping': 'mapping_launch.py',
-            'nav2': 'nav2_stack_launch.py'
+            'nav2': 'nav2_stack_launch.py',
+            'autonomy': 'autonomy_launch.py',
         }
         
         launch_file = launch_files.get(system_name)
@@ -131,7 +133,8 @@ class LaunchManagerNode(Node):
         
         try:
             process = subprocess.Popen(
-                ['ros2', 'launch', 'lunabot_bringup', launch_file, f'use_sim:={use_sim_arg}'],
+                ['ros2', 'launch', 'lunabot_bringup', launch_file, f'use_sim:={use_sim_arg}']
+                + (['start_mission:=true'] if system_name == 'autonomy' else []),
                 stdin=subprocess.DEVNULL,
                 start_new_session=True
             )
@@ -163,7 +166,8 @@ class LaunchManagerNode(Node):
             'pointlio': 'pointlio_launch',
             'mapping': 'mapping_launch',
             'nav2': 'nav2_stack_launch',
-            'hardware': 'hardware_launch'
+            'hardware': 'hardware_launch',
+            'autonomy': 'autonomy_launch',
         }
         
         pattern = patterns.get(system_name, system_name)

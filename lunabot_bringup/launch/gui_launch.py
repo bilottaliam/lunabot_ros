@@ -1,5 +1,7 @@
+import json
 import os
-from ament_index_python.packages import get_package_share_directory
+import subprocess
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -12,10 +14,12 @@ from launch.actions import (
     SetLaunchConfiguration,
     OpaqueFunction,
     GroupAction,
+    SetEnvironmentVariable,
 )
 
 
 def set_orientation(context, *args, **kwargs):
+    context.launch_configurations["robot_heading_name"] = context.launch_configurations.get("robot_heading")
     orientations = {"north": -1.5708, "east": 3.1416, "south": 1.5708, "west": 0.0}
     chosen_orientation = context.launch_configurations.get("robot_heading")
     return [SetLaunchConfiguration("robot_heading", str(orientations.get(chosen_orientation, 0.0)))]
@@ -43,6 +47,28 @@ def set_world_file(context, *args, **kwargs):
         "artemis": os.path.join(sim_dir, "worlds", "high_resolution", "artemis", "artemis_arena.world"),
     }
     return [SetLaunchConfiguration("world_file", world_files.get(world_type, world_files["artemis"]))]
+
+
+def setup_generated_arena(context, *args, **kwargs):
+    """artemis2027: generate the world from seed:= and spawn at its (optionally random) start pose."""
+    if context.launch_configurations.get("arena_type") != "artemis2027":
+        return []
+    seed = context.launch_configurations.get("seed")
+    out = os.path.expanduser(f"~/.ros/lunabot_sim/arena_{seed}")
+    cmd = [os.path.join(get_package_prefix("lunabot_sim"), "lib", "lunabot_sim", "generate_arena.py"),
+           "--seed", seed, "--out", out]
+    if context.launch_configurations.get("random_start") == "true":
+        cmd.append("--random-start")
+    else:
+        cmd += ["--heading", context.launch_configurations.get("robot_heading_name")]
+    start = json.loads(subprocess.check_output(cmd))["start"]
+    return [
+        SetLaunchConfiguration("world_file", os.path.join(out, "arena.sdf")),
+        SetLaunchConfiguration("spawn_x", str(start["x"])),
+        SetLaunchConfiguration("spawn_y", str(start["y"])),
+        SetLaunchConfiguration("spawn_z", "0.25"),
+        SetLaunchConfiguration("robot_heading", str(start["yaw"])),
+    ]
 
 
 def set_robot_urdf(context, *args, **kwargs):
@@ -197,15 +223,27 @@ def generate_launch_description():
     declare_arena_type = DeclareLaunchArgument(
         "arena_type",
         default_value="artemis",
-        choices=["ucf", "artemis"],
-        description="Choose the arena: 'ucf' for UCF arena or 'artemis' for Artemis arena.",
+        choices=["ucf", "artemis", "artemis2027"],
+        description="Choose the arena: 'ucf', 'artemis', or 'artemis2027' (2027 layout generated from seed:=).",
+    )
+
+    declare_seed = DeclareLaunchArgument(
+        "seed", default_value="0", description="artemis2027: obstacle layout seed."
+    )
+
+    declare_random_start = DeclareLaunchArgument(
+        "random_start",
+        default_value="false",
+        choices=["true", "false"],
+        description="artemis2027: random start position and N/E/S/W heading inside the starting zone "
+        "(otherwise (1, 1) facing robot_heading; east = +X toward the berm).",
     )
 
     declare_viz_mode = DeclareLaunchArgument(
         "viz_mode",
         default_value="gui",
-        choices=["rviz", "gui"],
-        description="Choose visualization mode: 'rviz' for RViz2 or 'gui' for custom PyQt GUI.",
+        choices=["rviz", "gui", "none"],
+        description="Choose visualization mode: 'rviz' for RViz2, 'gui' for custom PyQt GUI, 'none' for headless runs.",
     )
 
     rviz_launch = Node(
@@ -291,6 +329,16 @@ def generate_launch_description():
         condition=IfCondition(EqualsSubstitution(LaunchConfiguration("use_sim"), "false")),
     )
 
+    # Real robot: this laptop's ROS graph stays local; mcc_relay is the only link to the robot
+    # (its foxglove_bridge), carrying just the allow-listed topics the GUI subscribes to.
+    mcc_relay_real = GroupAction(
+        actions=[
+            Node(package="lunabot_gui", executable="mcc_relay.py", name="mcc_relay", output="screen",
+                 parameters=[{"robot_url": LaunchConfiguration("robot_url")}]),
+        ],
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration("use_sim"), "false")),
+    )
+
     bandwidth_monitor_real = GroupAction(
         actions=[bandwidth_monitor_node],
         condition=IfCondition(EqualsSubstitution(LaunchConfiguration("use_sim"), "false")),
@@ -323,6 +371,10 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription()
+    # Real robot: before any node starts, keep this laptop's DDS local (the relay is the only link)
+    ld.add_action(SetEnvironmentVariable(
+        "ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST",
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration("use_sim", default="false"), "false"))))
 
     ld.add_action(declare_robot_type)
     ld.add_action(declare_use_sim)
@@ -330,12 +382,19 @@ def generate_launch_description():
     ld.add_action(declare_sim_gui)
     ld.add_action(declare_arena_type)
     ld.add_action(declare_viz_mode)
+    ld.add_action(DeclareLaunchArgument(
+        "robot_url", default_value="ws://192.168.0.250:8765",
+        description="Real mode: the robot's foxglove_bridge (MCC link)."))
+    ld.add_action(mcc_relay_real)
+    ld.add_action(declare_seed)
+    ld.add_action(declare_random_start)
 
     ld.add_action(OpaqueFunction(function=set_robot_urdf))
     ld.add_action(OpaqueFunction(function=set_robot_entity_name))
     ld.add_action(OpaqueFunction(function=set_orientation))
     ld.add_action(OpaqueFunction(function=set_world_file))
     ld.add_action(OpaqueFunction(function=set_spawn_coordinates))
+    ld.add_action(OpaqueFunction(function=setup_generated_arena))
 
     ld.add_action(rviz_group)
     ld.add_action(custom_gui_group)

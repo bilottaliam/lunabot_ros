@@ -1,0 +1,34 @@
+# The only link between the robot and the MCC laptop. All other ROS traffic stays on the robot
+# (ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST on both sides), so no DDS discovery or /tf crosses Wi-Fi.
+# The bridge only sends a topic while the MCC is subscribed to it, so cameras are on-demand.
+foxglove_bridge:
+  ros__parameters:
+    port: 8765
+    address: 0.0.0.0
+    # Robot -> MCC. Autonomy visualization is ~1 Hz and pre-transformed to the arena frame (mcc_gateway).
+    topic_whitelist:
+      - '^/mcc/.*'
+      - '^/mission/state$'
+      - '^/arena_localizer/status$'
+      - '^/power_monitor$'
+      - '^/control_state$'
+      - '^/rosout_agg$'
+      - '^/camera_(front|back|fisheye)/video$'   # teleop/recovery H.264 (foxglove CompressedVideo), on demand only
+    # MCC -> robot
+    client_topic_whitelist:
+      - '^/cmd_vel$'
+      - '^/mission/(inhibit|command)$'
+      - '^/emergency_stop$'
+      - '^/mode_switch$'
+      - '^/position_controller/commands$'
+      - '^/camera_controller/commands$'
+      - '^/excavation_angle$'
+    service_whitelist:
+      - '^/launch_system$'
+      - '^/stop_system$'
+    param_whitelist: []
+    capabilities: [clientPublish, services]   # no parameters/connectionGraph/assets: chatter we don't need
+    sysinfo: false
+    remote_access: false
+    max_qos_depth: 1
+    send_buffer_limit: 2000000
