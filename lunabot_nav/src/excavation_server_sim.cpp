@@ -37,7 +37,7 @@ public:
   ExcavationServerSim() : Node("excavation_server")
   {
     action_server_ = rclcpp_action::create_server<Excavation>(
-      this, "excavation_action",
+      this, "auto_excavation_action",  // same name as the real auto_excavation_server
       [this](const auto &, const auto &) {
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
