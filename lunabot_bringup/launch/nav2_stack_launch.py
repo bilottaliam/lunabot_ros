@@ -96,6 +96,10 @@ def generate_launch_description():
                     ]
                 },
                 {"node_timeout": 30.0},
+                # Lyrical's lifecycle manager calls this service_timeout. Configuring all four servers can take
+                # longer than the default while a loaded machine is starting up (seen in the sim: bt_navigator
+                # was never activated). Only affects how long it waits, not what it does.
+                {"service_timeout": 60.0},
                 {"bond_timeout": 10.0},
                 {"attempt_respawn_reconnection": True},
             ],
