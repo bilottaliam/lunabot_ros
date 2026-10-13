@@ -1,0 +1,28 @@
+seed 1: 27/52 plans
+seed 2: 26/52 plans
+seed 3: 31/52 plans
+seed 4: 16/52 plans
+seed 5: 31/36 plans
+seed 6: 19/52 plans
+seed 7: 37/52 plans
+seed 8: 20/36 plans
+seed 9: 23/52 plans
+seed 10: 32/36 plans
+seed 11: 23/36 plans
+seed 12: 40/52 plans
+seed 13: 16/52 plans
+seed 14: 20/52 plans
+seed 15: 14/52 plans
+seed 16: 17/36 plans
+seed 17: 36/52 plans
+seed 18: 31/52 plans
+seed 19: 34/36 plans
+seed 20: 51/52 plans
+
+Success = a collision-free path (footprint vs ground truth) on legs that some planner solved collision-free (198 legs); 'returned' counts any path the planner returned.
+| planner | success | returned | plan time mean/max (s) | length (m) | heading change (rad) | in-place rot (rad) | sharp turns | reverse (m) | min clearance rock / crater / wall (m) |
+|---|---|---|---|---|---|---|---|---|---|
+| GridBased | 191/198 | 198 | 0.02 / 0.04 | 4.33 | 1.08 | 0.00 | 0.67 | 1.13 | -0.01 / -0.02 / 0.05 |
+| Hybrid | 80/198 | 80 | 0.15 / 1.32 | 5.86 | 5.65 | 0.00 | 2.17 | 0.00 | 0.14 / 0.20 / 0.00 |
+| HybridRS | 151/198 | 151 | 0.45 / 6.08 | 4.52 | 3.98 | 0.01 | 1.31 | 0.38 | 0.07 / 0.13 / 0.01 |
+| Lattice | 78/198 | 84 | 0.08 / 0.50 | 4.17 | 4.60 | 0.83 | 2.03 | 0.00 | 0.04 / 0.20 / -0.01 |

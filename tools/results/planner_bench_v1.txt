@@ -1,0 +1,28 @@
+seed 1: 30/52 plans
+seed 2: 27/52 plans
+seed 3: 34/52 plans
+seed 4: 16/52 plans
+seed 5: 28/36 plans
+seed 6: 19/52 plans
+seed 7: 37/52 plans
+seed 8: 22/36 plans
+seed 9: 23/52 plans
+seed 10: 32/36 plans
+seed 11: 23/36 plans
+seed 12: 41/52 plans
+seed 13: 16/52 plans
+seed 14: 17/52 plans
+seed 15: 13/52 plans
+seed 16: 19/36 plans
+seed 17: 36/52 plans
+seed 18: 31/52 plans
+seed 19: 34/36 plans
+seed 20: 50/52 plans
+
+Success counts legs that at least one planner solved (229 legs).
+| planner | success | plan time mean/max (s) | length (m) | heading change (rad) | in-place rot (rad) | sharp turns | reverse (m) | min clearance rock / crater / wall (m) |
+|---|---|---|---|---|---|---|---|---|
+| GridBased | 229/229 | 0.02 / 0.05 | 4.30 | 1.13 | 0.00 | 0.71 | 0.99 | -0.18 / -0.15 / -0.05 |
+| Hybrid | 83/229 | 0.18 / 1.17 | 5.82 | 5.51 | 0.00 | 2.14 | 0.00 | 0.15 / 0.21 / 0.00 |
+| HybridRS | 156/229 | 0.45 / 6.08 | 4.52 | 3.99 | 0.01 | 1.22 | 0.38 | 0.07 / 0.13 / 0.00 |
+| Lattice | 80/229 | 0.12 / 0.80 | 4.41 | 5.02 | 1.23 | 2.10 | 0.00 | 0.04 / 0.20 / -0.13 |
