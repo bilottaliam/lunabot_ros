@@ -116,5 +116,7 @@ install(
           excavation_server_sim
           depositing_server_sim
   DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/mission_executive.py scripts/arena_localizer.py scripts/terrain_mapper.py
+        DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

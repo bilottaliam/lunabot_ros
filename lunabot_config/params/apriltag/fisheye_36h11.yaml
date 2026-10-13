@@ -1,0 +1,15 @@
+# apriltag_ros on the pan-able rear camera (camera_fisheye): the D456s are pitched 48 deg down and
+# cannot see wall-height tags beyond ~0.5 m, the fisheye (45 deg down, 120 deg HFOV, pans) can.
+/**:
+  ros__parameters:
+    image_transport: raw
+    family: 36h11
+    size: 0.25          # black-border edge (printed 0.3125 m including the white border)
+    max_hamming: 0      # no bit corrections: a false ID would corrupt the arena frame
+    detector:
+      threads: 2
+      decimate: 1.0     # 480x360 is already small; decimating loses the far tags
+      blur: 0.0
+      refine: true
+      sharpening: 0.25
+    pose_estimation_method: pnp
