@@ -57,6 +57,7 @@ def setup_generated_arena(context, *args, **kwargs):
     out = os.path.expanduser(f"~/.ros/lunabot_sim/arena_{seed}")
     cmd = [os.path.join(get_package_prefix("lunabot_sim"), "lib", "lunabot_sim", "generate_arena.py"),
            "--seed", seed, "--out", out]
+    cmd += ["--rtf", context.launch_configurations.get("sim_rtf", "1.0")]
     if context.launch_configurations.get("random_start") == "true":
         cmd.append("--random-start")
     else:
@@ -241,6 +242,12 @@ def generate_launch_description():
         description="Choose the arena: 'ucf', 'artemis', or 'artemis2027' (2027 layout generated from seed:=).",
     )
 
+    declare_sim_rtf = DeclareLaunchArgument(
+        "sim_rtf", default_value="1.0",
+        description="artemis2027: real-time factor target. Set it below what the machine sustains with the full "
+        "stack (laptop: ~0.4) so rendered sensors stay in step with physics.",
+    )
+
     declare_seed = DeclareLaunchArgument(
         "seed", default_value="0", description="artemis2027: obstacle layout seed."
     )
@@ -403,6 +410,7 @@ def generate_launch_description():
         description="Real mode: the robot's foxglove_bridge (MCC link)."))
     ld.add_action(mcc_relay_real)
     ld.add_action(declare_seed)
+    ld.add_action(declare_sim_rtf)
     ld.add_action(declare_random_start)
 
     ld.add_action(OpaqueFunction(function=set_robot_urdf))

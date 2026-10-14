@@ -165,7 +165,7 @@ def box(name, x, y, z, sx, sy, sz, rgba, yaw=0.0, collide=True):
       </link></model>"""
 
 
-def world_sdf(gt, out):
+def world_sdf(gt, out, rtf=1.0):
     m = []
     g = "0.32 0.31 0.29 1"
     m.append(f"""
@@ -233,7 +233,7 @@ def world_sdf(gt, out):
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
-    <physics type='ode'><max_step_size>0.001</max_step_size><real_time_factor>1</real_time_factor></physics>
+    <physics type='ode'><max_step_size>0.001</max_step_size><real_time_factor>{rtf}</real_time_factor></physics>
     <gravity>0 0 -9.81</gravity>
     <scene><ambient>0.4 0.4 0.4 1</ambient><background>0.07 0.07 0.07 1</background><shadows>1</shadows><grid>false</grid></scene>
     <light name='sun' type='directional'><cast_shadows>1</cast_shadows><pose>0 0 10 0 0 0</pose>
@@ -244,7 +244,7 @@ def world_sdf(gt, out):
 """
 
 
-def generate(seed, out, randomize_start=False, heading=None):
+def generate(seed, out, randomize_start=False, heading=None, rtf=1.0):
     rng = np.random.default_rng(seed)
     for _ in range(100):
         obstacles = place_obstacles(rng)
@@ -266,7 +266,7 @@ def generate(seed, out, randomize_start=False, heading=None):
     os.makedirs(out, exist_ok=True)
     write_stl(os.path.join(out, "ground.stl"), *ground_heights(obstacles, rng))
     with open(os.path.join(out, "arena.sdf"), "w") as f:
-        f.write(world_sdf(gt, out))
+        f.write(world_sdf(gt, out, rtf))
     with open(os.path.join(out, "ground_truth.json"), "w") as f:
         json.dump(gt, f, indent=1)
     return gt
@@ -278,9 +278,11 @@ def main():
     p.add_argument("--out", default=None)
     p.add_argument("--random-start", action="store_true")
     p.add_argument("--heading", choices=list(HEADINGS), default=None)
+    p.add_argument("--rtf", type=float, default=1.0,
+                   help="real-time factor target; below what the machine sustains, sensors stay in step with physics")
     a = p.parse_args()
     out = os.path.expanduser(a.out or f"~/.ros/lunabot_sim/arena_{a.seed}")
-    gt = generate(a.seed, out, a.random_start, a.heading)
+    gt = generate(a.seed, out, a.random_start, a.heading, a.rtf)
     print(json.dumps({"world": os.path.join(out, "arena.sdf"), "start": gt["start"]}))
 
 

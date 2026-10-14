@@ -133,9 +133,11 @@ controller_server:
     PurePursuit:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       max_linear_vel: 0.25   # was desired_linear_vel (deprecated name in Lyrical)
-      lookahead_dist: 0.4
-      min_lookahead_dist: 0.2
-      max_lookahead_dist: 0.6
+      # Longer look-ahead and gentle angular acceleration: the robot wobbled left-right along paths, and every
+      # yaw reversal scrubs a skid steer (and corrupted Point-LIO in the sim).
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.35
+      max_lookahead_dist: 0.9
       lookahead_time: 1.5
       transform_tolerance: 1.0
       use_velocity_scaled_lookahead_dist: false
@@ -153,7 +155,7 @@ controller_server:
       # planned. RPP can't do both, so no in-place line-up turns: the planner handles start/goal headings.
       use_rotate_to_heading: false
       allow_reversing: true
-      max_angular_accel: 1.0
+      max_angular_accel: 0.5
       max_robot_pose_search_dist: 10.0
 
 

@@ -23,6 +23,7 @@ def generate_launch_description():
     lc = LaunchConfiguration
     return LaunchDescription([
         DeclareLaunchArgument("seed", default_value="0"),
+        DeclareLaunchArgument("sim_rtf", default_value="1.0"),
         DeclareLaunchArgument("random_start", default_value="true"),
         DeclareLaunchArgument("robot_heading", default_value="east"),
         DeclareLaunchArgument("sim_gui", default_value="false"),
@@ -32,6 +33,7 @@ def generate_launch_description():
         DeclareLaunchArgument("run_duration", default_value="900.0"),
         include("gui_launch.py", 0, use_sim="true", arena_type="artemis2027", seed=lc("seed"),
                 random_start=lc("random_start"), robot_heading=lc("robot_heading"), sim_gui=lc("sim_gui"),
+                sim_rtf=lc("sim_rtf"),
                 viz_mode="none"),
         include("pointlio_launch.py", 20, use_sim="true"),
         include("mapping_launch.py", 30, use_sim="true"),
