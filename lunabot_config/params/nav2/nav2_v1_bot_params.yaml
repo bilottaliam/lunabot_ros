@@ -3,7 +3,7 @@ bt_navigator:
     use_sim_time: true
     global_frame: odom   # plans in Point-LIO's frame; goals come in the tag-anchored arena frame (AUTONOMY.md)
     robot_base_frame: base_link
-    odom_topic: /lio_odom  # /odometry/filtered had no publisher (UKF disabled)
+    odom_topic: /odometry/filtered  # sim: EKF (Point-LIO + wheels + gyro), see ekf_sim.yaml
     bt_loop_duration: 20
     default_server_timeout: 100
     wait_for_service_timeout: 1000

@@ -252,6 +252,11 @@ void publish_odometry(
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
   }
   set_posestamp(odomAftMapped.pose.pose);
+  // Fixed pose covariance (lunabot) so a robot_localization filter can weigh this against wheel/IMU
+  // data; it was all zeros, which a filter reads as "perfect". 5 cm, 0.1 rad (2D terms).
+  odomAftMapped.pose.covariance[0] = odomAftMapped.pose.covariance[7] = 0.0025;
+  odomAftMapped.pose.covariance[14] = odomAftMapped.pose.covariance[21] = odomAftMapped.pose.covariance[28] = 0.01;
+  odomAftMapped.pose.covariance[35] = 0.01;
 
   pubOdomAftMapped->publish(odomAftMapped);
 

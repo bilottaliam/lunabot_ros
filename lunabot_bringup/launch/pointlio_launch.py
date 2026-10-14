@@ -72,11 +72,16 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    return [
-        livox_reorient_node,
-        point_lio_node,
-        #ukf_node,
-    ]
+    # Sim only: fuse Point-LIO with wheel odometry + gyro (ekf_sim.yaml). The real robot has no wheel
+    # odometry topic, so it keeps Point-LIO's own odom->base_link.
+    ekf_sim_node = Node(
+        package="robot_localization",
+        executable="ekf_node",
+        name="ekf_filter_node",
+        output="screen",
+        parameters=[os.path.join(config_dir, "params", "robot_localization", "ekf_sim.yaml"), {"use_sim_time": True}],
+    )
+    return [livox_reorient_node, point_lio_node] + ([ekf_sim_node] if use_sim.lower() == "true" else [])
 
 
 def generate_launch_description():

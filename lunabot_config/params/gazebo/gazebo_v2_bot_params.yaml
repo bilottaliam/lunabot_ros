@@ -42,7 +42,11 @@ diff_drive_controller:
     publish_rate: 50.0
     odom_frame_id: odom
     base_frame_id: base_link
-    open_loop: true
+    # Measured wheel motion, not integrated commands: /wheel_odom feeds the sim's UKF, and open loop it
+    # reported motion even when the robot was jammed.
+    open_loop: false
+    pose_covariance_diagonal: [0.01, 0.01, 1.0, 1.0, 1.0, 0.03]   # z/roll/pitch unused (2D)
+    twist_covariance_diagonal: [0.04, 0.04, 1.0, 1.0, 1.0, 0.03]   # skid steer slips: wheels overstate travel ~9%
     velocity_rolling_window_size: 2
     enable_odom_tf: false
     position_feedback: true

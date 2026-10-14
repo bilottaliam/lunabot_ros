@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Height-based obstacle layer: rocks above the ground plane, craters (negative obstacles) below it.
 
-Accumulates Point-LIO's deskewed cloud (/cloud_registered, gravity-aligned odom frame) into a
+Accumulates Point-LIO's body-frame cloud (/cloud_registered_body), placed in the gravity-aligned odom frame, into a
 per-cell evidence grid in `grid_frame` and publishes:
   /terrain/grid    OccupancyGrid for Nav2 (StaticLayer, trinary_costmap: false):
                    0 = seen free, `unknown_value` = never seen, 100 = obstacle/crater + hard margin
@@ -41,7 +41,7 @@ class TerrainMapper(Node):
         super().__init__("terrain_mapper")
         p = {
             # grid in Point-LIO's frame: RTAB-Map's map corrections don't smear it
-            "cloud_topic": "/cloud_registered", "grid_frame": "odom", "base_frame": "base_link",
+            "cloud_topic": "/cloud_registered_body", "grid_frame": "odom", "base_frame": "base_link",
             "resolution": 0.05, "size": 16.0,
             "ground_offset": -0.02,      # wheel contact below base_link (URDF: wheel z 0.08, r 0.1016)
             "rock_height": 0.10,         # above ground: boulders are 30-40 cm across, of varying height
@@ -79,7 +79,7 @@ class TerrainMapper(Node):
 
     def on_cloud(self, msg):
         try:
-            # The cloud is in Point-LIO's odom frame (= grid frame by default); TF can lag ~1 s, so use latest
+            # Body-frame cloud placed with the odom->base_link TF (fused in the sim); TF can lag ~1 s, so use latest
             M = tf_matrix(self.tf.lookup_transform(self.frame, msg.header.frame_id, Time()))
             T = M
             # robot pose only sets the ground reference and range filter: the latest is fine (TF can lag ~1 s)

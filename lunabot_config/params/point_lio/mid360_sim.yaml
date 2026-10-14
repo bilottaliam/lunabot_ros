@@ -53,7 +53,7 @@
       path_en: true
       scan_publish_en: true
       scan_bodyframe_pub_en: true
-      tf_send_en: true
+      tf_send_en: false   # sim: the UKF (ekf_sim.yaml) owns odom->base_link, fusing this with wheels + IMU
       odom_frame_id: "odom"
       base_frame_id: "base_link"
 
