@@ -248,6 +248,11 @@ def generate_launch_description():
         "stack (laptop: ~0.4) so rendered sensors stay in step with physics.",
     )
 
+    declare_sim_test_odom = DeclareLaunchArgument(
+        "sim_test_odom", default_value="false", choices=["true", "false"],
+        description="TEST ONLY (sim): publish physics-engine odometry on /sim_test_odom (see AUTONOMY.md).",
+    )
+
     declare_seed = DeclareLaunchArgument(
         "seed", default_value="0", description="artemis2027: obstacle layout seed."
     )
@@ -308,7 +313,8 @@ def generate_launch_description():
                 # value_type=str: otherwise launch_ros tries to parse the URDF as YAML and fails on any
                 # comment containing ": "
                 "robot_description": ParameterValue(
-                    Command(["xacro ", LaunchConfiguration("urdf_file"), " use_sim:=", LaunchConfiguration("use_sim")]),
+                    Command(["xacro ", LaunchConfiguration("urdf_file"), " use_sim:=", LaunchConfiguration("use_sim"),
+                             " sim_test_odom:=", LaunchConfiguration("sim_test_odom")]),
                     value_type=str,
                 ),
                 "use_sim_time": LaunchConfiguration("use_sim"),
@@ -411,6 +417,7 @@ def generate_launch_description():
     ld.add_action(mcc_relay_real)
     ld.add_action(declare_seed)
     ld.add_action(declare_sim_rtf)
+    ld.add_action(declare_sim_test_odom)
     ld.add_action(declare_random_start)
 
     ld.add_action(OpaqueFunction(function=set_robot_urdf))

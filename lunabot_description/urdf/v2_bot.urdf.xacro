@@ -3,6 +3,9 @@
   xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:arg name="use_sim" default="true" />
+  <!-- TEST ONLY (sim): odometry from the physics engine, for evaluating planning/mission logic
+       independently of the sim's lidar-odometry drift (AUTONOMY.md). Never used on the robot. -->
+  <xacro:arg name="sim_test_odom" default="false" />
 
   <xacro:if value="$(arg use_sim)">
     <xacro:property name="camera_sim_link_offset" value="0.01" />
@@ -554,6 +557,20 @@
         <pose>0 0 0 0 0 0</pose>
       </sensor>
     </gazebo>
+
+    <xacro:if value="$(arg sim_test_odom)">
+      <gazebo>
+        <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+          <odom_frame>odom</odom_frame>
+          <robot_base_frame>base_link</robot_base_frame>
+          <odom_topic>/sim_test_odom</odom_topic>
+          <tf_topic>/sim_test_odom_tf</tf_topic>
+          <dimensions>2</dimensions>
+          <odom_publish_frequency>50</odom_publish_frequency>
+          <gaussian_noise>0.005</gaussian_noise>
+        </plugin>
+      </gazebo>
+    </xacro:if>
 
     <gazebo>
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">

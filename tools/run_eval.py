@@ -199,7 +199,8 @@ def run_one(seed, a, outdir):
     log = open(os.path.join(outdir, f"seed_{seed}.log"), "w")
     cmd = ["systemd-run", "--user", "--scope", "--collect", "-p", "MemoryMax=7G", "-p", "TimeoutStopSec=20", f"--unit={unit}",
            "ros2", "launch", "lunabot_bringup", "sim_autonomy_launch.py", f"seed:={seed}", "random_start:=true",
-           f"max_cycles:={a.max_cycles}", f"run_duration:={a.run_duration}"] + \
+           f"max_cycles:={a.max_cycles}", f"run_duration:={a.run_duration}",
+           f"test_odom:={'true' if a.test_odom else 'false'}"] + \
           ([f"planner_id:={a.planner}"] if a.planner else [])
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     time.sleep(3)
@@ -215,7 +216,8 @@ def run_one(seed, a, outdir):
                 break
     finally:
         rep = mon.report(a.liters_per_dump)
-        rep.update(seed=seed, start=gt["start"], wall_s=round(time.monotonic() - mon.t_start), timed_out=time.monotonic() >= t_end)
+        rep.update(odometry="TEST-ONLY physics odometry" if a.test_odom else "Point-LIO + wheels + gyro (EKF)",
+                   seed=seed, start=gt["start"], wall_s=round(time.monotonic() - mon.t_start), timed_out=time.monotonic() >= t_end)
         mon.destroy_node()
         subprocess.run(["systemctl", "--user", "stop", f"{unit}.scope"], check=False)
         proc.wait(timeout=60)
@@ -251,6 +253,8 @@ def main():
     ap.add_argument("--run-duration", type=float, default=900.0, help="mission run clock (sim seconds)")
     ap.add_argument("--wall-timeout", type=float, default=3600.0)
     ap.add_argument("--liters-per-dump", type=float, default=8.0, help="ASSUMPTION: regolith per bucket load")
+    ap.add_argument("--test-odom", action="store_true",
+                    help="TEST ONLY: physics-engine odometry instead of Point-LIO (results are labelled)")
     ap.add_argument("--monitor", action="store_true")
     ap.add_argument("--seed", type=int, default=0, help="--monitor: seed of the running sim")
     a = ap.parse_args()
@@ -277,7 +281,7 @@ def main():
         print(f"=== seed {seed} ===", flush=True)
         reps.append(run_one(seed, a, outdir))
         print(table(reps[-1:]).splitlines()[-1], flush=True)
-    out = table(reps)
+    out = (f"Odometry: {reps[0]['odometry']}\n\n" if reps else "") + table(reps)
     with open(os.path.join(outdir, "summary.md"), "w") as f:
         f.write(out + "\n")
     print(out)

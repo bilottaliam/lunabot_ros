@@ -108,3 +108,10 @@
   gz_type_name: gz.msgs.PointCloudPacked
   direction: GZ_TO_ROS
   lazy: true   # only converted while something subscribes (nothing in the stack does)
+
+- ros_topic_name: /sim_test_odom   # TEST ONLY: physics-engine odometry (sim_test_odom:=true)
+  gz_topic_name: /sim_test_odom
+  ros_type_name: nav_msgs/msg/Odometry
+  gz_type_name: gz.msgs.Odometry
+  direction: GZ_TO_ROS
+  lazy: true

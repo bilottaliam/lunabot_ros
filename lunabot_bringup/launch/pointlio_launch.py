@@ -10,6 +10,7 @@ from launch.actions import OpaqueFunction
 def launch_setup(context, *args, **kwargs):
     config_dir = get_package_share_directory("lunabot_config")
     use_sim = LaunchConfiguration("use_sim").perform(context)
+    test_odom = LaunchConfiguration("test_odom").perform(context)   # TEST ONLY, sim: physics odometry
     
     if use_sim.lower() == "true":
         point_lio_config = os.path.join(
@@ -79,7 +80,9 @@ def launch_setup(context, *args, **kwargs):
         executable="ekf_node",
         name="ekf_filter_node",
         output="screen",
-        parameters=[os.path.join(config_dir, "params", "robot_localization", "ekf_sim.yaml"), {"use_sim_time": True}],
+        parameters=[os.path.join(config_dir, "params", "robot_localization",
+                                 "ekf_sim_test_odom.yaml" if test_odom == "true" else "ekf_sim.yaml"),
+                    {"use_sim_time": True}],
     )
     return [livox_reorient_node, point_lio_node] + ([ekf_sim_node] if use_sim.lower() == "true" else [])
 
@@ -93,5 +96,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         declare_use_sim,
+        DeclareLaunchArgument("test_odom", default_value="false", choices=["true", "false"]),
         OpaqueFunction(function=launch_setup),
     ])
