@@ -1,0 +1,9 @@
+# The IMU gets its own bridge process: sharing one with the cameras, ~20% of the 100 Hz IMU samples were
+# lost when the full stack loaded the laptop (sim at 0.58x real time), and Point-LIO drifted ~0.3 m per
+# metre driven. Sim only.
+- ros_topic_name: /livox/imu
+  gz_topic_name: /livox/imu
+  ros_type_name: sensor_msgs/msg/Imu
+  gz_type_name: gz.msgs.IMU
+  direction: GZ_TO_ROS
+

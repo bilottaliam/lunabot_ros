@@ -69,6 +69,7 @@ class Monitor(Node):
         self.contacts = {"rock": 0, "crater": 0, "wall": 0, "rock_outside_obstacle_zone": 0}
         self.contact_log = []
         self.loc_err = []
+        self.trace = []   # 1 Hz: elapsed, ground truth x/y/yaw, estimate x/y/yaw (arena frame)
         self.state = {}
         self.dumps = []
         self.seen_events = set()
@@ -148,6 +149,8 @@ class Monitor(Node):
                 tr = t.transform.translation
                 yaw = 2 * math.atan2(t.transform.rotation.z, t.transform.rotation.w)
                 self.loc_err.append((math.hypot(tr.x - pose[0], tr.y - pose[1]), abs(math.remainder(yaw - pose[2], math.tau))))
+                self.trace.append([round(time.monotonic() - self.t_start, 1), *[round(v, 3) for v in pose],
+                                   round(tr.x, 3), round(tr.y, 3), round(yaw, 3)])
         except TransformException:
             pass
 
@@ -177,7 +180,7 @@ class Monitor(Node):
             "dumps": self.dumps, "dumps_inside": inside, "berm_liters_est": volume,
             "loc_err_mean_m": round(float(err[:, 0].mean()), 3), "loc_err_max_m": round(float(err[:, 0].max()), 3),
             "loc_yaw_err_max_deg": round(math.degrees(float(err[:, 1].max())), 1),
-            "mcc_mbps": round(mbps, 4), "mcc_bytes": self.bytes,
+            "mcc_mbps": round(mbps, 4), "mcc_bytes": self.bytes, "trace": self.trace,
             "score": {"autonomy": round(autonomy, 1), "bandwidth": round(bandwidth, 1), "penalty": -penalty,
                       "total": round(autonomy + bandwidth - penalty, 1)},
         }

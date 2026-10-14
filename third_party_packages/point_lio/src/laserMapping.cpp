@@ -346,15 +346,18 @@ int main(int argc, char ** argv)
   /*** ROS subscribe initialization ***/
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox;
+  // Deep queues (lunabot): SensorDataQoS keeps only 5 messages, i.e. 50 ms of a 100 Hz IMU. The main loop
+  // processes a scan between spin_some() calls, so any scan slower than that silently dropped IMU samples;
+  // in the sim under load ~20% were lost and the odometry drifted ~0.3 m per metre driven.
   if (p_pre->lidar_type == AVIA) {
     sub_pcl_livox = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-      lid_topic, rclcpp::SensorDataQoS(), livox_pcl_cbk);
+      lid_topic, rclcpp::SensorDataQoS().keep_last(20), livox_pcl_cbk);
   } else {
     sub_pcl_pc = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-      lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+      lid_topic, rclcpp::SensorDataQoS().keep_last(20), standard_pcl_cbk);
   }
   auto sub_imu = nh->create_subscription<sensor_msgs::msg::Imu>(
-    imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
+    imu_topic, rclcpp::SensorDataQoS().keep_last(2000), imu_cbk);
   auto pub_laser_cloud_full_res =
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_registered", 1000);
   auto pub_laser_cloud_full_res_body =

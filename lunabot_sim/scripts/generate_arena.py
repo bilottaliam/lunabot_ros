@@ -34,7 +34,7 @@ HEADINGS = {"east": 0.0, "north": math.pi / 2, "west": math.pi, "south": -math.p
 
 # AprilTag 36h11 on the starting-zone frame (the 2 allowed sides). size = black-border edge.
 TAG_SIZE = 0.25
-TAG_Z = 0.40
+TAG_Z = 0.45   # centre; the 0.31 m printed tag clears the 0.28 m duct top
 TAGS = [  # id, x, y, yaw of the tag's outward normal (into the arena). Spread to the ends of each
     # 2 m side: the yaw error of the fit (and so the error at the berm, 5 m away) scales with 1/baseline.
     # On the wall face behind the 17 cm ducts, where the starting-zone frame (80/20) is.
@@ -176,30 +176,24 @@ def world_sdf(gt, out):
         <visual name='v'><geometry><mesh><uri>{out}/ground.stl</uri></mesh></geometry>
           <material><ambient>{g}</ambient><diffuse>{g}</diffuse></material></visual>
       </link></model>""")
-    # Walls (outside the ducts) and the 17 cm PVC ducts along the inside of the walls
-    t, h = 0.1, 1.0
-    for name, x, y, sx, sy in [
-        ("wall_s", ARENA_X / 2, -DUCT_D - t / 2, ARENA_X + 2 * (DUCT_D + t), t),
-        ("wall_n", ARENA_X / 2, ARENA_Y + DUCT_D + t / 2, ARENA_X + 2 * (DUCT_D + t), t),
-        ("wall_w", -DUCT_D - t / 2, ARENA_Y / 2, t, ARENA_Y + 2 * DUCT_D),
-        ("wall_e", ARENA_X + DUCT_D + t / 2, ARENA_Y / 2, t, ARENA_Y + 2 * DUCT_D),
-    ]:
-        m.append(box(name, x, y, h / 2 - 0.2, sx, sy, h + 0.4, "0.55 0.55 0.6 1"))
-    r = DUCT_D / 2
-    for name, x, y, length, yaw in [
-        ("duct_s", ARENA_X / 2, -r, ARENA_X + 2 * DUCT_D, 0), ("duct_n", ARENA_X / 2, ARENA_Y + r, ARENA_X + 2 * DUCT_D, 0),
-        ("duct_w", -r, ARENA_Y / 2, ARENA_Y, math.pi / 2), ("duct_e", ARENA_X + r, ARENA_Y / 2, ARENA_Y, math.pi / 2),
-    ]:
-        geo = f"<geometry><cylinder><radius>{r}</radius><length>{length}</length></cylinder></geometry>"
+    # Walls, 17 cm ducts, window frames, windows and building columns: the team's Artemis arena meshes,
+    # which are this arena (ducts 7.22 x 5.34 m outside = 6.88 x 5.0 m between them), shifted so the
+    # interior corner is the origin. Plain box walls made a near-featureless room in which Point-LIO
+    # diverged over a 5 m drive; with these meshes it was measured at 1-10 cm (REVIEW.md).
+    ox, oy = ARENA_X / 2, ARENA_Y / 2
+    for part in ("arena_walls", "arena_pipe", "arena_columns", "arena_window_frames", "arena_windows"):
+        mat = ("<material><ambient>0.5 0.5 0.5 0.3</ambient><diffuse>0.7 0.7 0.7 0.3</diffuse></material>"
+               if part == "arena_windows" else "")
         m.append(f"""
-    <model name='{name}'><static>true</static><pose>{x} {y} {r} {math.pi / 2} 0 {yaw + math.pi / 2}</pose>
-      <link name='link'><collision name='c'>{geo}</collision>
-        <visual name='v'>{geo}<material><ambient>0.9 0.9 0.9 1</ambient><diffuse>0.9 0.9 0.9 1</diffuse></material></visual>
+    <model name='{part}'><static>true</static><pose>{ox} {oy} 1.248 0 0 0</pose>
+      <link name='link'>
+        <collision name='c'><geometry><mesh><uri>model://artemis_arena/{part}/{part}.stl</uri></mesh></geometry></collision>
+        <visual name='v'><geometry><mesh><uri>model://artemis_arena/{part}/{part}.dae</uri></mesh></geometry>{mat}</visual>
       </link></model>""")
     cx, cy = COLUMN_CENTER
     m.append(box("column", cx, cy, 1.0, COLUMN_SIZE, COLUMN_SIZE, 2.4, "0.6 0.2 0.2 1"))
     # Starting-zone frame (80/20 rails) on its two wall sides, and the zone/berm markings (visual only)
-    for i, z in enumerate((0.22, 0.58)):
+    for i, z in enumerate((0.33, 0.62)):   # above the ducts (top at 0.28 m)
         m.append(box(f"frame_s{i}", 1.0, -DUCT_D + 0.02, z, 2.0, 0.04, 0.04, "0.75 0.75 0.78 1"))
         m.append(box(f"frame_w{i}", -DUCT_D + 0.02, 1.0, z, 0.04, 2.0, 0.04, "0.75 0.75 0.78 1"))
     for name, (x0, y0, x1, y1), rgba in [

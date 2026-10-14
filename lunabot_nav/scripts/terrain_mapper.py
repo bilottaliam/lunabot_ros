@@ -11,13 +11,13 @@ Ground reference: the robot's own wheel contact height. The arena is a raked, gr
 so one reference over 7 m holds to a few cm; thresholds are sized well above that.
 """
 import math
+from array import array
 
 import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose, PoseArray
 from nav_msgs.msg import OccupancyGrid
-from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
@@ -40,7 +40,8 @@ class TerrainMapper(Node):
     def __init__(self):
         super().__init__("terrain_mapper")
         p = {
-            "cloud_topic": "/cloud_registered", "grid_frame": "map", "base_frame": "base_link",
+            # grid in Point-LIO's frame: RTAB-Map's map corrections don't smear it
+            "cloud_topic": "/cloud_registered", "grid_frame": "odom", "base_frame": "base_link",
             "resolution": 0.05, "size": 16.0,
             "ground_offset": -0.02,      # wheel contact below base_link (URDF: wheel z 0.08, r 0.1016)
             "rock_height": 0.10,         # above ground: boulders are 30-40 cm across, of varying height
@@ -78,12 +79,11 @@ class TerrainMapper(Node):
 
     def on_cloud(self, msg):
         try:
-            # The cloud is in Point-LIO's odom frame, whose odom->base_link is exact at the stamp. map->odom
-            # (RTAB-Map) moves slowly and lags by >1 s in a slow sim, so take its latest value.
-            stamp = Time.from_msg(msg.header.stamp)
+            # The cloud is in Point-LIO's odom frame (= grid frame by default); TF can lag ~1 s, so use latest
             M = tf_matrix(self.tf.lookup_transform(self.frame, msg.header.frame_id, Time()))
             T = M
-            B = M @ tf_matrix(self.tf.lookup_transform(msg.header.frame_id, self.base, stamp, Duration(seconds=0.2)))
+            # robot pose only sets the ground reference and range filter: the latest is fine (TF can lag ~1 s)
+            B = M @ tf_matrix(self.tf.lookup_transform(msg.header.frame_id, self.base, Time()))
         except TransformException as e:
             self.get_logger().warning(f"no transform: {e}", throttle_duration_sec=5.0)
             return
@@ -136,7 +136,7 @@ class TerrainMapper(Node):
         msg.info.width = msg.info.height = self.n
         msg.info.origin.position.x = msg.info.origin.position.y = self.origin
         msg.info.origin.orientation.w = 1.0
-        msg.data = data.T.ravel().tolist()  # row-major in y
+        msg.data = array("b", data.T.tobytes())  # row-major in y; a list of 100k ints cost ~0.1 s per publish
         self.grid_pub.publish(msg)
         for pub, mask in ((self.rock_pub, rock), (self.crater_pub, crater)):
             pub.publish(self.centres(mask, msg.header))

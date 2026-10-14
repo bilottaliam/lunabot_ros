@@ -5,7 +5,7 @@ from ament_index_python.packages import get_package_prefix, get_package_share_di
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from launch.substitutions import Command, LaunchConfiguration, EqualsSubstitution
+from launch.substitutions import Command, LaunchConfiguration, EqualsSubstitution, PythonExpression
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.actions import (
@@ -126,6 +126,19 @@ def create_sim_group(context, *args, **kwargs):
         output="screen",
     )
 
+    # IMU on its own bridge process so camera traffic can't starve it (see ros_gz_bridge_imu.yaml)
+    imu_bridge_node = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="imu_bridge",
+        parameters=[{
+            "config_file": os.path.join(
+                get_package_share_directory("lunabot_config"), "params", "gazebo", "ros_gz_bridge_imu.yaml"
+            ),
+        }],
+        output="screen",
+    )
+
     pointcloud_to_livox_node = Node(
         package="lunabot_util",
         executable="pointcloud_to_livox",
@@ -177,6 +190,7 @@ def create_sim_group(context, *args, **kwargs):
         sim_launch,
         spawn_robot_node,
         bridge_node,
+        imu_bridge_node,
         pointcloud_to_livox_node,
         topic_remapper_node,
         controller_spawner,
@@ -355,9 +369,11 @@ def generate_launch_description():
         ],
     )
 
+    # JPEG previews for the GUI; headless runs (viz_mode:=none) have no GUI and it cost ~45% of a core
     image_compressor_sim = GroupAction(
         actions=[image_compressor_sim_node],
-        condition=IfCondition(EqualsSubstitution(LaunchConfiguration("use_sim"), "true")),
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration("use_sim"), "' == 'true' and '",
+                                                LaunchConfiguration("viz_mode"), "' != 'none'"])),
     )
 
     rviz_group = GroupAction(

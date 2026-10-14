@@ -152,7 +152,9 @@ def main():
          "-r", "__ns:=/", "-p", "global_costmap.global_costmap.use_sim_time:=false"],
         ["ros2", "run", "nav2_lifecycle_manager", "lifecycle_manager", "--ros-args", "-p", "node_names:=[planner_server]",
          "-p", "autostart:=true", "-p", "use_sim_time:=false"],
-        ["ros2", "run", "tf2_ros", "static_transform_publisher", "--frame-id", "map", "--child-frame-id", "base_link"],
+        # the grids are in map; Nav2 plans in odom (sim params): identity map->odom->base_link
+        ["ros2", "run", "tf2_ros", "static_transform_publisher", "--frame-id", "map", "--child-frame-id", "odom"],
+        ["ros2", "run", "tf2_ros", "static_transform_publisher", "--frame-id", "odom", "--child-frame-id", "base_link"],
     )]
     rclpy.init()
     nav = BasicNavigator("planner_bench")

@@ -19,6 +19,7 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from lunabot_msgs.action import Depositing, Excavation
+from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
@@ -101,7 +102,7 @@ class MissionExecutive(BasicNavigator):
 
         self.loc = {}
         self.grid = None
-        self.last_cmd = (0.0, Time())
+        self.last_cmd = (0.0, -1e9)   # (linear x, ROS-clock seconds) of the last non-zero /cmd_vel
         self.inhibited = False
         self.phase = "WAIT_NAV2"
         self.goal_desc = ""
@@ -149,7 +150,7 @@ class MissionExecutive(BasicNavigator):
 
     def on_cmd(self, msg):
         if abs(msg.linear.x) > 0.03 or abs(msg.angular.z) > 0.15:
-            self.last_cmd = (msg.linear.x, self.get_clock().now())
+            self.last_cmd = (msg.linear.x, self.get_clock().now().nanoseconds * 1e-9)
 
     def inhibit(self, why):
         if self.inhibited:
@@ -177,19 +178,73 @@ class MissionExecutive(BasicNavigator):
         q = t.transform.rotation
         return t.transform.translation.x, t.transform.translation.y, 2 * math.atan2(q.z, q.w)
 
+    def pose_now(self, timeout=10.0):
+        """Robot pose in the arena frame, waiting briefly for TF (the arena frame can be seconds old)."""
+        end = time.monotonic() + timeout
+        while (pose := self.robot_pose()) is None and time.monotonic() < end:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        return pose
+
     def stamped(self, x, y, yaw):
         p = PoseStamped()
         p.header.frame_id = "arena"
-        p.header.stamp = self.get_clock().now().to_msg()
+        # stamp 0 = "latest TF": goals are fixed in the arena, and a 'now' stamp made Nav2 wait for a
+        # map->odom (RTAB-Map) that lags by >1 s, which stalled planning for as long as it lagged.
         p.pose.position.x, p.pose.position.y = float(x), float(y)
         p.pose.orientation.z, p.pose.orientation.w = yaw_q(yaw)
         return p
 
+    def send_goal(self, client, goal, timeout=10.0):
+        """send_goal_async with a bounded wait: BasicNavigator waits forever for the goal response, and
+        under load one that never arrives hung the whole mission (clock and inhibit checks included)."""
+        f = client.send_goal_async(goal, self._feedbackCallback)
+        rclpy.spin_until_future_complete(self, f, timeout_sec=timeout)
+        if not f.done() or f.result() is None or not f.result().accepted:
+            return None
+        return f.result()
+
+    def go_to(self, pose):
+        """NavigateToPose that keeps BasicNavigator's state, so isTaskComplete()/cancelTask() work."""
+        self.clearPreviousState()
+        handle = None
+        if self.nav_to_pose_client.wait_for_server(timeout_sec=5.0):
+            handle = self.send_goal(self.nav_to_pose_client, NavigateToPose.Goal(pose=pose))
+        if handle is None:   # see plan(): recreate the client for fresh discovery
+            self.nav_to_pose_client.destroy()
+            self.nav_to_pose_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+            return False
+        self.goal_handle, self.result_future = handle, handle.get_result_async()
+        return True
+
+    def plan(self, start, goal, timeout=15.0):
+        """ComputePathToPose with timeouts; None if it fails or takes too long. Smac caps its search at
+        max_planning_time (2 s), but the first request also builds lookup tables, and a cancelled request
+        keeps the planner busy, so a short timeout here made every following request time out too."""
+        g = ComputePathToPose.Goal(goal=goal, planner_id=self.p["planner_id"], use_start=start is not None)
+        if start is not None:
+            g.start = start
+        handle = None
+        if self.compute_path_to_pose_client.wait_for_server(timeout_sec=5.0):
+            handle = self.send_goal(self.compute_path_to_pose_client, g)
+        if handle is None:
+            # Seen in the sim: this process's client never matched the planner's action server (a fresh
+            # client in another process planned fine). A new client entity gets fresh discovery.
+            self.compute_path_to_pose_client.destroy()
+            self.compute_path_to_pose_client = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
+            self.event("planner unreachable; recreated the ComputePathToPose client")
+            return None
+        r = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, r, timeout_sec=timeout)
+        if not r.done():
+            handle.cancel_goal_async()
+            return None
+        res = r.result()
+        return res.result.path if res.status == GoalStatus.STATUS_SUCCEEDED else None
+
     def plan_cost(self, start, goal):
         """Cost-to-go of a leg from Nav2's own planner (same costmap and planner the robot will drive)."""
         t = time.monotonic()
-        path = self.getPath(self.stamped(*start) if start else PoseStamped(), self.stamped(*goal),
-                            self.p["planner_id"], use_start=start is not None)
+        path = self.plan(self.stamped(*start) if start else None, self.stamped(*goal))
         dt = time.monotonic() - t
         if path is None or not path.poses:
             return math.inf, dt
@@ -243,6 +298,8 @@ class MissionExecutive(BasicNavigator):
 
     def choose_lane(self, start):
         """Excavation pass whose start is cheap to reach and whose end points at a cheap route to the berm."""
+        if start is None:
+            return None
         L = self.p["excavation_distance"]
         slot = min(self.dumps, key=lambda x: (self.dumps[x], x))
         target = self.predump_pose(slot, self.p["dump_reverse_options"][0])
@@ -287,7 +344,9 @@ class MissionExecutive(BasicNavigator):
         for attempt in range(self.p["nav_retries"]):
             if not self.check_clock():
                 return False
-            self.goToPose(self.stamped(*goal))
+            if not self.go_to(self.stamped(*goal)):
+                self.event(f"{desc}: NavigateToPose not accepted, retry {attempt + 1}")
+                continue
             track = []
             while not self.isTaskComplete():
                 if not self.check_clock():
@@ -296,7 +355,7 @@ class MissionExecutive(BasicNavigator):
                 pose = self.robot_pose("odom")
                 if pose:
                     track = [(t, p) for t, p in track if (now - t).nanoseconds * 1e-9 < self.p["stuck_time"]] + [(now, pose)]
-                commanding = (now - self.last_cmd[1]).nanoseconds * 1e-9 < 1.0
+                commanding = now.nanoseconds * 1e-9 - self.last_cmd[1] < 1.0
                 span = (now - track[0][0]).nanoseconds * 1e-9 if track else 0.0
                 if commanding and span > self.p["stuck_time"] * 0.9:
                     moved = math.hypot(track[-1][1][0] - track[0][1][0], track[-1][1][1] - track[0][1][1])
@@ -406,7 +465,11 @@ class MissionExecutive(BasicNavigator):
 
         loaded = False
         while self.check_clock() and (not self.p["max_cycles"] or self.cycles < self.p["max_cycles"]):
-            here = self.robot_pose()
+            here = self.pose_now()
+            if here is None:
+                self.event("no arena pose (TF); waiting")
+                self.spin_wait(2.0)
+                continue
             if not loaded:
                 lane = self.choose_lane(here) or self.choose_lane(here)
                 if lane is None:
@@ -427,7 +490,7 @@ class MissionExecutive(BasicNavigator):
                     loaded = True
                 continue
 
-            choice = self.choose_dump(self.robot_pose())
+            choice = self.choose_dump(self.pose_now())
             if choice is None:
                 self.event("no path to any dump slot; waiting for the map")
                 self.spin_wait(2.0)
@@ -460,7 +523,7 @@ class MissionExecutive(BasicNavigator):
             self.phase = "TRAVEL_EMPTY"
             self.event("AUTONOMY ATTEMPT: travel empty to the excavation zone (hands-free)")
             # The next excavation lane is the goal, so the loop top finds the robot already there
-            goal = self.choose_lane(self.robot_pose()) or (1.8, 2.5, math.pi)
+            goal = self.choose_lane(self.pose_now()) or (1.8, 2.5, math.pi)
             ok = self.timed("travel_empty", lambda: self.drive(goal, "return to excavation zone"))
             self.segment("travel", ok)
             if ok:

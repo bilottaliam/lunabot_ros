@@ -58,6 +58,19 @@ def test_solve_2d():
             assert np.linalg.norm(R2 @ berm_map + t2 - berm) < tol, (k, np.linalg.norm(R2 @ berm_map + t2 - berm))
 
 
+def test_single_tag_normal():
+    """Tag z axis -> ground-plane normal yaw, as arena_localizer computes it from the TF quaternion."""
+    def mul(a, b):  # quaternion product, (x, y, z, w)
+        ax, ay, az, aw = a; bx, by, bz, bw = b
+        return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+                aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+    for yaw in np.linspace(-3, 3, 7):
+        # a vertical tag facing `yaw`: rotate the tag's z onto +x (90 deg about y), then turn about z
+        q = mul((0, 0, math.sin(yaw / 2), math.cos(yaw / 2)), (0, math.sin(math.pi / 4), 0, math.cos(math.pi / 4)))
+        nx, ny = 2 * (q[0] * q[2] + q[1] * q[3]), 2 * (q[1] * q[2] - q[0] * q[3])
+        assert abs(math.remainder(math.atan2(ny, nx) - yaw, math.tau)) < 1e-6
+
+
 class _P:
     def __init__(self, x, y, yaw):
         self.pose = type("pose", (), {})()

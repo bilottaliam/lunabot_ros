@@ -3,12 +3,13 @@
 #
 # Arena frame (guidebook Figure 9): origin at the starting-zone corner measured between the ducts,
 # x along the 6.88 m length toward the berm, y across the 5.0 m width, z up from the regolith.
+# yaw = direction the tag faces (its outward normal, into the arena), degrees in the arena frame.
 # x, y, z = tag centre (here: on the frame on the wall face, behind the 17 cm ducts). Only x, y are used for localization; z documents the mounting height.
 #
 # These defaults are the sim layout (lunabot_sim/scripts/generate_arena.py). At the competition,
 # MEASURE each tag centre during setup (procedure: AUTONOMY.md, "Tag placement") and edit here.
 tags:
-  - {id: 0, x: 0.25, y: -0.12, z: 0.40}   # starting-zone side along the y = 0 wall (berm-side wall)
-  - {id: 1, x: 1.75, y: -0.12, z: 0.40}
-  - {id: 2, x: -0.12, y: 0.25, z: 0.40}   # starting-zone side along the x = 0 wall
-  - {id: 3, x: -0.12, y: 1.75, z: 0.40}
+  - {id: 0, x: 0.25, y: -0.12, z: 0.45, yaw: 90}   # starting-zone side along the y = 0 wall (berm-side wall)
+  - {id: 1, x: 1.75, y: -0.12, z: 0.45, yaw: 90}
+  - {id: 2, x: -0.12, y: 0.25, z: 0.45, yaw: 0}   # starting-zone side along the x = 0 wall
+  - {id: 3, x: -0.12, y: 1.75, z: 0.45, yaw: 0}

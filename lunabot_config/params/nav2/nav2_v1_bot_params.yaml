@@ -1,7 +1,7 @@
 bt_navigator:
   ros__parameters:
     use_sim_time: true
-    global_frame: map
+    global_frame: odom   # plans in Point-LIO's frame; goals come in the tag-anchored arena frame (AUTONOMY.md)
     robot_base_frame: base_link
     odom_topic: /lio_odom  # /odometry/filtered had no publisher (UKF disabled)
     bt_loop_duration: 20
@@ -162,7 +162,12 @@ global_costmap:
     ros__parameters:
       update_frequency: 2.0
       publish_frequency: 1.0
-      global_frame: map
+      global_frame: odom
+      # Fixed 16 x 16 m window: with two static layers of different geometry (RTAB-Map 4 cm, terrain 5 cm)
+      # a non-rolling costmap resized itself to whichever map arrived last, every update.
+      rolling_window: true
+      width: 16
+      height: 16
       robot_base_frame: base_link
       use_sim_time: true
       footprint: "[ [0.6, 0.41], [0.6, -0.41], [-0.45, -0.41], [-0.45, 0.41] ]"  # same as the real robot (rear: fisheye mast)
@@ -172,13 +177,10 @@ global_costmap:
       # terrain grid; non-trinary so terrain "unknown" (25) costs ~63 and the planner avoids unknown space.
       use_maximum: true
       trinary_costmap: false
-      plugins: ["static_layer", "terrain_layer", "inflation_layer"]
-      static_layer:  # RTAB-Map /map: walls, column
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_topic: /map
-        map_subscribe_transient_local: true
-        subscribe_to_updates: true
-        footprint_clearing_enabled: true
+      # Obstacles come from terrain_mapper only (rocks, craters, and the walls/ducts/column it sees as tall
+      # blobs). RTAB-Map's /map layer was redundant, and when RTAB-Map hadn't published yet the costmap
+      # never became current, which stalled the planner.
+      plugins: ["terrain_layer", "inflation_layer"]
       terrain_layer:  # lunabot_nav terrain_mapper: rocks above / craters below the ground, with hard margins
         plugin: "nav2_costmap_2d::StaticLayer"
         map_topic: /terrain/grid
@@ -211,13 +213,10 @@ local_costmap:
       # terrain grid; non-trinary so terrain "unknown" (25) costs ~63 and the planner avoids unknown space.
       use_maximum: true
       trinary_costmap: false
-      plugins: ["static_layer", "terrain_layer", "inflation_layer"]
-      static_layer:  # RTAB-Map /map: walls, column
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_topic: /map
-        map_subscribe_transient_local: true
-        subscribe_to_updates: true
-        footprint_clearing_enabled: true
+      # Obstacles come from terrain_mapper only (rocks, craters, and the walls/ducts/column it sees as tall
+      # blobs). RTAB-Map's /map layer was redundant, and when RTAB-Map hadn't published yet the costmap
+      # never became current, which stalled the planner.
+      plugins: ["terrain_layer", "inflation_layer"]
       terrain_layer:  # lunabot_nav terrain_mapper: rocks above / craters below the ground, with hard margins
         plugin: "nav2_costmap_2d::StaticLayer"
         map_topic: /terrain/grid
