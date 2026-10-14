@@ -19,7 +19,9 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from lunabot_msgs.action import Depositing, Excavation
-from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from builtin_interfaces.msg import Duration as DurationMsg
+from geometry_msgs.msg import Point
+from nav2_msgs.action import BackUp, ComputePathToPose, DriveOnHeading, NavigateToPose, Spin
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
@@ -373,9 +375,7 @@ class MissionExecutive(BasicNavigator):
 
     def recover(self, last_v):
         """Move 0.3 m away from whatever stopped us (opposite to the last commanded direction), then replan."""
-        task = self.driveOnHeading(0.3, 0.1, 8) if last_v < 0 else self.backup(0.3, 0.1, 8)
-        while task and not self.isTaskComplete():
-            pass
+        self.behavior("drive" if last_v < 0 else "backup", 0.3, allowance=8)
         self.relocalize_pub.publish(String(data="stuck recovery"))
 
     def run_action(self, client, goal, desc, timeout):
@@ -421,24 +421,38 @@ class MissionExecutive(BasicNavigator):
             if waited > self.p["localize_timeout"] * (spins + 1) and spins < 4:
                 spins += 1
                 self.event("no tag fix yet; turning 90 deg in the starting zone to look for tags")
-                if not self.run_behavior(lambda: self.spin(1.57, 30)):
+                if not self.behavior("spin", 1.57, allowance=30):
                     # Too close to a wall to turn in place (the footprint sweeps 0.73 m): move off it first.
                     # Nav2 collision-checks both; the moves stay inside the 2 x 2 m starting zone.
                     self.event("spin blocked; moving 0.4 m off the wall, then turning")
-                    if not self.run_behavior(lambda: self.driveOnHeading(0.4, 0.1, 15)):
-                        self.run_behavior(lambda: self.backup(0.3, 0.1, 15))
-                    self.run_behavior(lambda: self.spin(1.57, 30))
+                    if not self.behavior("drive", 0.4, allowance=15):
+                        self.behavior("backup", 0.3, allowance=15)
+                    self.behavior("spin", 1.57, allowance=30)
             if self.elapsed() > self.p["start_deadline"] - 60:
                 return False
         self.event(f"localized: tags {self.loc.get('tags')} residual {self.loc.get('residual'):.3f} m")
         return True
 
-    def run_behavior(self, start):
-        """Run a Nav2 behavior (spin/backup/drive) to completion; True if it succeeded."""
-        task = start()
-        while task and not self.isTaskComplete():
-            pass
-        return bool(task) and self.getResult() == TaskResult.SUCCEEDED
+    def behavior(self, kind, amount, speed=0.1, allowance=20):
+        """Nav2 Spin / BackUp / DriveOnHeading with bounded waits (BasicNavigator's wait forever for the
+        goal response; one that never came hung the mission). True if it succeeded."""
+        client, goal = {
+            "spin": (self.spin_client, Spin.Goal(target_yaw=float(amount))),
+            "backup": (self.backup_client, BackUp.Goal(target=Point(x=float(amount)), speed=float(speed))),
+            "drive": (self.drive_on_heading_client, DriveOnHeading.Goal(target=Point(x=float(amount)), speed=float(speed))),
+        }[kind]
+        goal.time_allowance = DurationMsg(sec=int(allowance))
+        if not client.wait_for_server(timeout_sec=5.0):
+            return False
+        handle = self.send_goal(client, goal)
+        if handle is None:
+            return False
+        r = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, r, timeout_sec=allowance + 10.0)
+        if not r.done():
+            handle.cancel_goal_async()
+            return False
+        return r.result().status == GoalStatus.STATUS_SUCCEEDED
 
     def excavate_here(self):
         self.phase = "EXCAVATE"
@@ -506,9 +520,7 @@ class MissionExecutive(BasicNavigator):
             self.phase = "DUMP"
             self.event("AUTONOMY ATTEMPT: dump (hands-free)")
             if reverse > 0:
-                task = self.backup(reverse, 0.08, 20)
-                while task and not self.isTaskComplete():
-                    pass
+                self.behavior("backup", reverse, 0.08, 20)
             ok = self.timed("dump", lambda: self.run_action(self.dump_client, Depositing.Goal(), "dump", 120))
             self.segment("dump", ok)
             self.dumps[slot] += int(ok)

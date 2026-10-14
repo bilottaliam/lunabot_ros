@@ -46,7 +46,7 @@ diff_drive_controller:
     # reported motion even when the robot was jammed.
     open_loop: false
     pose_covariance_diagonal: [0.01, 0.01, 1.0, 1.0, 1.0, 0.03]   # z/roll/pitch unused (2D)
-    twist_covariance_diagonal: [0.04, 0.04, 1.0, 1.0, 1.0, 0.03]   # skid steer slips: wheels overstate travel ~9%
+    twist_covariance_diagonal: [0.004, 0.004, 1.0, 1.0, 1.0, 0.03]   # sim wheels are accurate when not scrubbing (1.00 m for 1.00 m)
     velocity_rolling_window_size: 2
     enable_odom_tf: false
     position_feedback: true

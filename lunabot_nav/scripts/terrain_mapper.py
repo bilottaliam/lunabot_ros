@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose, PoseArray
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
@@ -26,14 +26,29 @@ from sensor_msgs_py import point_cloud2
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
-def tf_matrix(t):
-    q, p = t.transform.rotation, t.transform.translation
+def quat_matrix(q):
     x, y, z, w = q.x, q.y, q.z, q.w
     return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), p.x],
-        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w), p.y],
-        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y), p.z],
-        [0, 0, 0, 1]])
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def tf_matrix(t):
+    M = np.eye(4)
+    M[:3, :3] = quat_matrix(t.transform.rotation)
+    p = t.transform.translation
+    M[:3, 3] = p.x, p.y, p.z
+    return M
+
+
+def tilt(q):
+    """4x4 rotation with only the roll/pitch of quaternion q (its yaw removed)."""
+    R = quat_matrix(q)
+    yaw = math.atan2(R[1, 0], R[0, 0])
+    T = np.eye(4)
+    T[:3, :3] = np.array([[math.cos(yaw), math.sin(yaw), 0], [-math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]]) @ R
+    return T
 
 
 class TerrainMapper(Node):
@@ -71,6 +86,10 @@ class TerrainMapper(Node):
         self.tf = Buffer()
         TransformListener(self.tf, self)
         self.create_subscription(PointCloud2, g("cloud_topic"), self.on_cloud, qos_profile_sensor_data)
+        # Roll/pitch from Point-LIO's attitude: the sim's odom->base_link comes from a 2D EKF (no roll/pitch),
+        # and a 2 deg tilt puts flat ground 17 cm off at 5 m, i.e. "rock" or "crater".
+        self.lio_q = None
+        self.create_subscription(Odometry, "/lio_odom", lambda m: setattr(self, "lio_q", m.pose.pose.orientation), 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.grid_pub = self.create_publisher(OccupancyGrid, "/terrain/grid", latched)
         self.rock_pub = self.create_publisher(PoseArray, "/terrain/rocks", latched)
@@ -81,9 +100,10 @@ class TerrainMapper(Node):
         try:
             # Body-frame cloud placed with the odom->base_link TF (fused in the sim); TF can lag ~1 s, so use latest
             M = tf_matrix(self.tf.lookup_transform(self.frame, msg.header.frame_id, Time()))
-            T = M
-            # robot pose only sets the ground reference and range filter: the latest is fine (TF can lag ~1 s)
             B = M @ tf_matrix(self.tf.lookup_transform(msg.header.frame_id, self.base, Time()))
+            T = M
+            if self.lio_q is not None:
+                T = M @ tilt(self.lio_q)
         except TransformException as e:
             self.get_logger().warning(f"no transform: {e}", throttle_duration_sec=5.0)
             return
