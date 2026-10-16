@@ -7,8 +7,13 @@ per-cell evidence grid in `grid_frame` and publishes:
                    0 = seen free, `unknown_value` = never seen, 100 = obstacle/crater + hard margin
   /terrain/rocks, /terrain/craters   PoseArray of detected obstacle centres (MCC, test harness)
 
-Ground reference: the robot's own wheel contact height. The arena is a raked, gravity-level bed,
-so one reference over 7 m holds to a few cm; thresholds are sized well above that.
+Ground reference: the local ground around each cell (mean of the cells' lowest returns within
+`ground_window`), not the robot's own height. A robot standing in the pit it dug would otherwise see the
+ground around it as rock, and it makes the map independent of odom z drift.
+
+Zones (arena frame, from the arena localizer's TF): craters are lethal in the obstacle zone only. In the
+excavation and construction zones depressions are our own pits, legal to drive into (guidebook 17.1 item 8),
+and the robot has to drive into them to keep digging. Without the arena frame everything is obstacle zone.
 """
 import math
 from array import array
@@ -42,6 +47,28 @@ def tf_matrix(t):
     return M
 
 
+def classify_scan(ij, z, n, rock_h, crater_d, window):
+    """Per-scan cell classes from points in grid cells ij (N x 2) with heights z: (high, low, ground) n x n masks.
+    Heights are judged against the local ground: the mean of the cells' lowest returns within `window` cells,
+    computed twice so rocks and craters don't bias their own reference."""
+    flat = ij[:, 0] * n + ij[:, 1]
+    zmin = np.full(n * n, np.inf)
+    zmax = np.full(n * n, -np.inf)
+    np.minimum.at(zmin, flat, z)
+    np.maximum.at(zmax, flat, z)
+    zmin, zmax = zmin.reshape(n, n), zmax.reshape(n, n)
+    seen = np.isfinite(zmin)
+    use = seen
+    for _ in range(2):
+        w = use.astype(np.float32)
+        total = cv2.boxFilter(np.where(use, zmin, 0).astype(np.float32), -1, (window, window), normalize=False)
+        ground = total / np.maximum(cv2.boxFilter(w, -1, (window, window), normalize=False), 1)
+        hi = seen & (zmax - ground > rock_h)
+        lo = seen & (zmin - ground < -crater_d)
+        use = seen & ~hi & ~lo
+    return hi, lo, use & (np.abs(zmin - ground) < 0.05)
+
+
 def tilt(q):
     """4x4 rotation with only the roll/pitch of quaternion q (its yaw removed)."""
     R = quat_matrix(q)
@@ -65,6 +92,11 @@ class TerrainMapper(Node):
             "rock_margin": 0.15,         # hard clearance painted lethal around rocks (-50 per contact)
             "crater_margin": 0.20,       # a wheel in a crater is a penalty and may end the run
             "max_rock_radius": 0.35,     # blobs larger than this (walls, column) get no hard margin
+            "ground_window": 1.0,        # local ground reference (m): several crater widths, < a typical dug pit
+            # arena-frame rects [xmin, ymin, xmax, ymax, ...] where depressions aren't craters: the excavation
+            # zone (x < 2.5, incl. the starting zone) and the construction zone (11.1, Figure 9)
+            "dig_zones": [-1.0, -1.0, 2.5, 6.0, 3.88, -1.0, 7.9, 1.5],
+            "arena_frame": "arena",
             "unknown_value": 25, "publish_rate": 2.0,
         }
         for k, v in p.items():
@@ -75,6 +107,9 @@ class TerrainMapper(Node):
         self.rock_h, self.crater_d, self.max_h, self.max_r = g("rock_height"), g("crater_depth"), g("max_height"), g("max_range")
         self.ground_offset, self.unknown = g("ground_offset"), g("unknown_value")
         self.max_rock_radius = g("max_rock_radius")
+        self.window = 2 * int(g("ground_window") / self.res / 2) + 1
+        self.dig_zones = np.array(g("dig_zones")).reshape(-1, 4)
+        self.arena = g("arena_frame")
         self.n = int(g("size") / self.res)
         self.origin = -g("size") / 2
         self.high = np.zeros((self.n, self.n), np.uint8)
@@ -112,20 +147,11 @@ class TerrainMapper(Node):
         robot = B[:3, 3]
         ground_z = robot[2] + self.ground_offset
         d = np.hypot(pts[:, 0] - robot[0], pts[:, 1] - robot[1])
-        dz = pts[:, 2] - ground_z
-        keep = (d < self.max_r) & (dz < self.max_h)
-        pts, dz = pts[keep], dz[keep]
+        keep = (d < self.max_r) & (pts[:, 2] - ground_z < self.max_h)  # crop ceiling/upper walls only
+        pts = pts[keep]
         ij = ((pts[:, :2] - self.origin) / self.res).astype(int)
         ok = (ij >= 0).all(1) & (ij < self.n).all(1)
-        ij, dz = ij[ok], dz[ok]
-
-        def cells(mask):
-            f = np.zeros((self.n, self.n), bool)
-            f[ij[mask, 0], ij[mask, 1]] = True
-            return f
-
-        hi, lo = cells(dz > self.rock_h), cells(dz < -self.crater_d)
-        gr = cells(np.abs(dz) < 0.05) & ~hi & ~lo
+        hi, lo, gr = classify_scan(ij[ok], pts[ok, 2], self.n, self.rock_h, self.crater_d, self.window)
         # Per-scan evidence, capped so later views can overturn earlier ones
         for acc, f in ((self.high, hi), (self.low, lo), (self.ground, gr)):
             acc[f] = np.minimum(acc[f] + 1, 20)
@@ -137,13 +163,17 @@ class TerrainMapper(Node):
 
     def publish(self):
         rock, crater = self.classify()
+        dig = self.dig_zone_mask()
+        crater = crater & ~dig
         # Hard margins go around rock-sized blobs only. Walls, ducts and the column are long/large blobs:
         # they stay lethal and get the costmap's soft inflation, but no margin, so a robot placed close
         # to a wall in the starting zone isn't boxed in by a margin that overlaps its own footprint.
         n, labels, stats, _ = cv2.connectedComponentsWithStats(rock.astype(np.uint8), connectivity=8)
         big = np.zeros(n, bool)
         big[1:] = np.sqrt(stats[1:, cv2.CC_STAT_AREA] / math.pi) * self.res > self.max_rock_radius
-        small_rock = rock & ~big[labels]
+        # The hard margins are for the obstacle-zone contact penalty. In the dig zones a rock-sized blob (often our
+        # own dump pile) stays lethal, but a margin there blocked the next dump slot beside the last pile.
+        small_rock = rock & ~big[labels] & ~dig
         lethal = cv2.dilate(small_rock.astype(np.uint8), self.kernels["rock_margin"]) | \
             cv2.dilate(crater.astype(np.uint8), self.kernels["crater_margin"]) | rock.astype(np.uint8)
         seen = (self.high | self.low | self.ground) > 0
@@ -160,6 +190,19 @@ class TerrainMapper(Node):
         self.grid_pub.publish(msg)
         for pub, mask in ((self.rock_pub, rock), (self.crater_pub, crater)):
             pub.publish(self.centres(mask, msg.header))
+
+    def dig_zone_mask(self):
+        """Grid cells inside the excavation/construction zones; none if the arena frame isn't known yet."""
+        try:
+            t = self.tf.lookup_transform(self.arena, self.frame, Time()).transform
+        except TransformException:
+            return np.zeros((self.n, self.n), bool)
+        c = self.origin + (np.arange(self.n) + 0.5) * self.res
+        X, Y = np.meshgrid(c, c, indexing="ij")   # grid index order [i (x), j (y)]
+        yaw = 2 * math.atan2(t.rotation.z, t.rotation.w)
+        ax = t.translation.x + math.cos(yaw) * X - math.sin(yaw) * Y
+        ay = t.translation.y + math.sin(yaw) * X + math.cos(yaw) * Y
+        return np.any([(ax >= x0) & (ax <= x1) & (ay >= y0) & (ay <= y1) for x0, y0, x1, y1 in self.dig_zones], axis=0)
 
     def centres(self, mask, header):
         """One pose per connected blob: centre, with the blob's equivalent radius in position.z."""

@@ -15,6 +15,7 @@ sys.path[:0] = [os.path.join(REPO, "lunabot_sim", "scripts"), os.path.join(REPO,
 import generate_arena as ga  # noqa: E402
 from arena_localizer import solve_2d  # noqa: E402
 from mission_executive import path_metrics  # noqa: E402
+from terrain_mapper import classify_scan  # noqa: E402
 
 
 def test_generator():
@@ -85,6 +86,30 @@ def test_path_metrics():
     assert np.allclose(path_metrics(rev), (1.0, 0.0, 1.0))
     turn = type("path", (), {"poses": [_P(0, 0, a) for a in np.linspace(0, math.pi / 2, 10)]})()
     assert np.allclose(path_metrics(turn)[:2], (0.0, math.pi / 2))
+
+
+def test_terrain_classify():
+    """Crater and boulder found against the local ground; a wide dug pit's floor is not a crater, and the
+    result doesn't depend on the absolute height (robot standing in a pit, odom z drift)."""
+    res, n = 0.05, 120
+    c = (np.arange(n) + 0.5) * res
+    X, Y = np.meshgrid(c, c, indexing="ij")
+    Z = 0.01 * np.sin(2 * X) * np.cos(1.5 * Y)
+    r2 = ((X - 1.5) ** 2 + (Y - 1.5) ** 2) / 0.225 ** 2
+    Z = np.where(r2 < 1, -0.3 * (1 - r2), Z)                                        # crater 0.45 x 0.3 m
+    Z = np.where(np.hypot(X - 4.5, Y - 1.5) < 0.175, Z + 0.2, Z)                   # boulder 0.35 x 0.2 m
+    inside = np.minimum.reduce([X - 3.25, 4.75 - X, Y - 3.45, 4.95 - Y])            # 1.5 m pit, 0.15 deep, 35 deg sides
+    Z -= 0.15 * np.clip(1 + inside * math.tan(math.radians(35)) / 0.15, 0, 1)
+    ij = np.stack([np.repeat(np.arange(n), n), np.tile(np.arange(n), n)], 1)
+    cell = lambda x, y: (int(x / res), int(y / res))
+    out = [classify_scan(ij, Z.ravel() + z0, n, 0.10, 0.10, 21) for z0 in (0.0, -0.4, 0.3)]
+    hi, lo, gr = out[0]
+    assert lo[cell(1.5, 1.5)] and not hi[cell(1.5, 1.5)]
+    assert hi[cell(4.5, 1.5)]
+    assert not lo[cell(4.0, 4.2)] and not hi[cell(4.0, 4.2)] and gr[cell(4.0, 4.2)]
+    assert gr[cell(1.0, 4.0)] and not (hi | lo)[cell(1.0, 4.0)]
+    for o in out[1:]:
+        assert all((a == b).all() for a, b in zip(o, out[0]))
 
 
 if __name__ == "__main__":

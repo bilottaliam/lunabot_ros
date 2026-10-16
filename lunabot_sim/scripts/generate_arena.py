@@ -165,17 +165,21 @@ def box(name, x, y, z, sx, sy, sz, rgba, yaw=0.0, collide=True):
       </link></model>"""
 
 
-def world_sdf(gt, out, rtf=1.0):
-    m = []
+def ground_model(name, stl):
+    """Static regolith model; tools/run_eval.py swaps in edited copies (dug pits, dumped piles)."""
     g = "0.32 0.31 0.29 1"
-    m.append(f"""
-    <model name='regolith'><static>true</static>
+    return f"""
+    <model name='{name}'><static>true</static>
       <link name='link'>
-        <collision name='c'><geometry><mesh><uri>{out}/ground.stl</uri></mesh></geometry>
+        <collision name='c'><geometry><mesh><uri>{stl}</uri></mesh></geometry>
           <surface><friction><ode><mu>0.4</mu><mu2>0.4</mu2></ode></friction></surface></collision>
-        <visual name='v'><geometry><mesh><uri>{out}/ground.stl</uri></mesh></geometry>
+        <visual name='v'><geometry><mesh><uri>{stl}</uri></mesh></geometry>
           <material><ambient>{g}</ambient><diffuse>{g}</diffuse></material></visual>
-      </link></model>""")
+      </link></model>"""
+
+
+def world_sdf(gt, out, rtf=1.0):
+    m = [ground_model("regolith", f"{out}/ground.stl")]
     # Walls, 17 cm ducts, window frames, windows and building columns: the team's Artemis arena meshes,
     # which are this arena (ducts 7.22 x 5.34 m outside = 6.88 x 5.0 m between them), shifted so the
     # interior corner is the origin. Plain box walls made a near-featureless room in which Point-LIO
@@ -264,7 +268,9 @@ def generate(seed, out, randomize_start=False, heading=None, rtf=1.0):
         "berm": {"x": BERM_CENTER[0], "y": BERM_CENTER[1], "length": BERM_SIZE[0], "width": BERM_SIZE[1]},
     }
     os.makedirs(out, exist_ok=True)
-    write_stl(os.path.join(out, "ground.stl"), *ground_heights(obstacles, rng))
+    xs, ys, Z = ground_heights(obstacles, rng)
+    write_stl(os.path.join(out, "ground.stl"), xs, ys, Z)
+    np.savez(os.path.join(out, "ground.npz"), xs=xs, ys=ys, Z=Z)  # for the harness's dig/dump edits
     with open(os.path.join(out, "arena.sdf"), "w") as f:
         f.write(world_sdf(gt, out, rtf))
     with open(os.path.join(out, "ground_truth.json"), "w") as f:

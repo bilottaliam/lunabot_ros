@@ -19,6 +19,8 @@ Each one is the call I made where the brief or the rulebook left a choice; chang
 | D8 | **Dump side = rear.** The bucket pivots at x = −0.204 and tips back over the rear; the real `auto_depositing_server` reverses before dumping. Dump poses put the rear edge (0.8 m) parallel to the berm box's long axis. | URDF + server code. | `mission_executive.py` |
 | D9 | **MCC link = `foxglove_bridge` with allow-lists**, not `rmw_zenoh`. | See [MCC link](#mcc-link-and-bandwidth). | `lunabot_config/params/mcc/foxglove_bridge.yaml` |
 | D10 | **No a-priori wall/column geometry anywhere in localization or the costmaps.** Walls, ducts and the column reach the planner only through online sensing (RTAB-Map `/map` and the terrain layer). Goal *positions* (berm, zones) are rulebook coordinates in the tag-defined arena frame. | 16.3.2 and 11.2.3. A geofence from the arena dimensions would be easy, but it is exactly the kind of a-priori wall use the autonomy judges are told to look for. | costmap params |
+| D11 | **Our own pits are drivable.** The terrain mapper judges height against the local ground, and craters are lethal only in the obstacle zone. In the excavation and construction zones a depression is not an obstacle, and rock-sized blobs (often our own dump piles) stay lethal but get no hard margin. That margin is there for the obstacle-zone contact penalty, and beside a pile it blocked the next dump slot (0.7 m apart). | Last season the robot dug a pit it then had to drive into. 17.1 item 8: the crater/rock penalty applies only in the obstacle zone; filling craters is allowed in the excavation and construction zones. Zone bounds are rulebook coordinates in the tag frame, like the goals (D10). Before the arena frame is known, everything is treated as obstacle zone. | `terrain_mapper.py` (`dig_zones`, `ground_window`) |
+| D12 | **Sim digs pits and builds piles** (test harness). Each "excavation complete" cuts the litres-per-load out of the ground under the pass (0.6 × 0.35 m, 35° sides); each "dump complete" adds a 35° cone behind the robot. The regolith model is swapped for the edited mesh. | The sim has no granular regolith; without this, pits, pile growth and dump-slot blocking are never exercised. Payload mass and real digging still aren't simulated. | `tools/run_eval.py` (`Ground`), `--no-ground-edits` |
 
 ## Rulebook constraints and how each is met
 
@@ -63,15 +65,15 @@ Every number has a physical reason; nothing is tuned to a sim artifact.
 
 | Quantity | Value | Reason |
 |---|---|---|
-| Ground reference | robot wheel contact (base_link z − 0.02 m) in the gravity-aligned Point-LIO frame | The bed is raked level; one reference over 7 m holds to a few cm, far below the thresholds. |
+| Ground reference | local: mean of each cell's lowest return within 1.0 m (two passes, rocks/craters excluded), in the gravity-aligned frame | D11. A robot in its own pit would see the ground around it as rock against its own height. Independent of odom z drift. 1.0 m is several crater widths, so a crater can't be its own reference. |
 | Rock threshold | > 0.10 m above ground, ≥ 2 scans, more high than ground evidence | Boulders are 30–40 cm across with varying heights; lidar noise ~2 cm, raked undulation ~±2 cm. 10 cm is under the robot's ~0.1 m wheel-radius clearance. |
-| Crater threshold | > 0.10 m below ground, same evidence rule | Craters are 40–50 cm wide and deep. Grazing rays only see the far wall: at ~2 m and beyond, a crater shows as unknown (shadow) before it shows as deep. |
+| Crater threshold | > 0.10 m below ground, same evidence rule, **obstacle zone only** | Craters are 40–50 cm wide and deep. Grazing rays only see the far wall: at ~2 m and beyond, a crater shows as unknown (shadow) before it shows as deep. In the excavation/construction zones depressions are our own pits (D11). |
 | Unknown cells | value 25 → Nav2 cost ~63 (non-trinary) | "Driving near unknown space" costs extra, so plans go through observed ground where they can. |
-| Rock hard margin | 0.15 m, painted lethal | −50 for the first contact. Pose error (≤ 0.10 m measured, LIO 1–10 cm) + tracking error. |
+| Rock hard margin | 0.15 m, painted lethal, obstacle zone only | −50 for the first contact (obstacle zone only, 17.1 item 8). Pose error (≤ 0.10 m measured, LIO 1–10 cm) + tracking error. |
 | Crater hard margin | 0.20 m, painted lethal | A wheel in a crater is a penalty and can end the run (no recovery from a 0.45 m hole), so the margin is larger. |
-| Walls / ducts / column | lethal from online sensing (RTAB-Map `/map` + terrain grid), then inflated like any obstacle | D10. Wall contact is a safety DQ, so the soft inflation below applies to them too. |
+| Walls / ducts / column | lethal from online sensing (terrain grid), then inflated like any obstacle | D10. Wall contact is a safety DQ, so the soft inflation below applies to them too. |
 | Soft inflation | radius 0.8 m, cost_scaling 5.0 | 0.8 ≥ the footprint's circumscribed radius (0.72 m), which Smac needs for exact footprint checks (the first benchmark showed paths crossing walls with 0.7). Cost decays to ~35 % of inscribed at 0.2 m beyond the inscribed radius. |
-| Footprint | `[0.6, ±0.4] … [−0.3, ±0.4]` about base_link (sim and real params) | The real robot's outline. Planner collision checks use it exactly (Smac Hybrid/Lattice), not a circle. |
+| Footprint | `[0.6, ±0.41] … [−0.45, ±0.41]` about base_link (sim and real params) | The real robot's outline. Planner collision checks use it exactly (Smac Hybrid/Lattice), not a circle. |
 
 **Planner** (see benchmark below): Reeds-Shepp Hybrid-A* with `reverse_penalty 3.0` (rear sensing is limited: reversing costs
 4× a forward metre), `change_penalty 0.5` (each direction change costs half a metre), `non_straight_penalty 1.2`
@@ -106,4 +108,15 @@ leads to: `length + 0.5 m/rad × heading change + 3.0 × reversed length`. Then:
 
 ## Changes that affect the real robot (needs hardware test)
 
-*(Filled in below.)*
+- **Terrain mapper local ground + zones (D11).** Drive into and out of a dug pit and check `/terrain/grid` stays free in the
+  excavation zone. Check real craters/boulders still show lethal in the obstacle zone, and nothing does before the tags have fixed the arena frame.
+- **Point-LIO subscriptions** (`third_party_packages/point_lio/src/laserMapping.cpp`): sensor-data QoS with lidar depth 20
+  and IMU depth 2000 (was 5, which dropped IMU under load), plus a fixed pose covariance in `/lio_odom`. Check that no IMU
+  or lidar messages drop and that the odometry still converges on the real Mid-360.
+- **Launch manager** sets `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` and starts the MCC link (`foxglove_bridge` + `mcc_gateway`).
+  Check every robot node still discovers the others, and that the laptop GUI connects only through the relay.
+- **Nav2 `service_timeout` 60 s** (bringup was timing out under load). Check that a real bringup still activates.
+- **Mission executive** replaces `navigation_client` for full autonomy. Bounded action waits, stuck detection and recovery,
+  `finish_heading` (an explicit spin when the robot is at the goal position with the wrong heading). Check against the real skid steer.
+- **MCC relay and GUI panels** (`mcc_relay.py`, `mcc_panel.py`): not yet run over a real link.
+- *(rest filled in below)*

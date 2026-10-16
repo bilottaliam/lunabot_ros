@@ -24,6 +24,9 @@ import time
 
 import numpy as np
 import rclpy
+from gz.msgs.boolean_pb2 import Boolean
+from gz.msgs.entity_factory_pb2 import EntityFactory
+from gz.msgs.entity_pb2 import Entity
 from gz.msgs.pose_v_pb2 import Pose_V
 from gz.transport import Node as GzNode
 from rclpy.node import Node
@@ -57,10 +60,57 @@ def rect_circle_dist(x, y, yaw, ox, oy):
     return math.hypot(max(fx.min() - lx, 0, lx - fx.max()), max(fy.min() - ly, 0, ly - fy.max()))
 
 
+class Ground:
+    """Pits dug and piles dumped in the sim: edits the generator's height field and swaps the regolith model.
+    Testing aid; the regolith itself isn't simulated (no payload mass, no granular flow)."""
+    CUT = (-0.2, 0.4, 0.35)          # ASSUMPTION: body-x span the bucket lip sweeps in a 0.6 m pass, cut width (URDF bucket)
+    PILE_BACK = 0.6                  # ASSUMPTION: pile centre behind base_link when tipping over the rear
+    REPOSE = math.tan(math.radians(35))
+
+    def __init__(self, arena_dir, gz):
+        g = np.load(os.path.join(arena_dir, "ground.npz"))
+        self.xs, self.ys, self.Z = g["xs"], g["ys"], g["Z"].copy()
+        self.X, self.Y = np.meshgrid(self.xs, self.ys, indexing="ij")
+        self.dir, self.gz, self.n, self.name = arena_dir, gz, 0, "regolith"
+
+    def dig(self, pose, liters):
+        """Rectangular cut under the pass that just ended at `pose`, edges at the angle of repose."""
+        x, y, yaw = pose
+        x0, x1, w = self.CUT
+        c, s = math.cos(yaw), math.sin(yaw)
+        lx, ly = c * (self.X - x) + s * (self.Y - y), -s * (self.X - x) + c * (self.Y - y)
+        d = liters / 1000 / ((x1 - x0) * w)
+        inside = np.minimum.reduce([lx - x0, x1 - lx, w / 2 - np.abs(ly)])  # < 0 outside the cut
+        self.Z -= d * np.clip(1 + inside * self.REPOSE / d, 0, 1)
+        return self.swap()
+
+    def pile(self, x, y, liters):
+        """Cone at the angle of repose; piles add up (ponytail: no slumping, so a tall berm stays steeper than real)."""
+        r = (3 * liters / 1000 / (math.pi * self.REPOSE)) ** (1 / 3)
+        self.Z += np.clip(self.REPOSE * (r - np.hypot(self.X - x, self.Y - y)), 0, None)
+        return self.swap()
+
+    def swap(self):
+        """New model first, then remove the old one, so the robot never loses its floor."""
+        self.n += 1
+        name, stl = f"regolith_{self.n}", os.path.join(self.dir, f"ground_{self.n}.stl")  # new path: gz caches meshes
+        ga.write_stl(stl, self.xs, self.ys, self.Z)
+        # blocking create: a remove queued in the same step as a non-blocking create was dropped
+        ok, rep = self.gz.request("/world/default/create/blocking",
+                                  EntityFactory(sdf=f"<sdf version='1.9'>{ga.ground_model(name, stl)}</sdf>"), EntityFactory, Boolean, 10000)
+        if not (ok and rep.data):
+            print(f"ground swap: create {name} failed", flush=True)
+            return False
+        # (remove/blocking removed the model but replied false)
+        self.gz.request("/world/default/remove", Entity(name=self.name, type=Entity.MODEL), Entity, Boolean, 5000)
+        self.name = name
+        return True
+
+
 class Monitor(Node):
     """Live penalty/contact monitor from ground truth, plus the mission's own reports."""
 
-    def __init__(self, gt, robot="v2_bot"):
+    def __init__(self, gt, robot="v2_bot", liters=None):
         super().__init__("eval_monitor")
         self.gt, self.robot = gt, robot
         self.pose = None
@@ -80,6 +130,9 @@ class Monitor(Node):
         TransformListener(self.tf, self)
         self.gz = GzNode()
         self.gz.subscribe(Pose_V, "/world/default/pose/info", self.on_gz)
+        self.liters, self.ground = liters, None
+        if liters:  # dig pits and dump piles into the sim's ground
+            self.ground = Ground(os.path.expanduser(f"~/.ros/lunabot_sim/arena_{gt['seed']}"), self.gz)
         self.create_subscription(String, "/mission/state", self.on_state, 10)
         self.subscribed = set()
         self.create_timer(1.0, self.tick)
@@ -127,11 +180,16 @@ class Monitor(Node):
             if key in self.seen_events:
                 continue
             self.seen_events.add(key)
+            if e["msg"] == "excavation complete" and pose and self.ground:
+                self.ground.dig(pose, self.liters)
             if e["msg"].startswith("dump complete") and pose:
                 px, py = pose[0] - DUMP_OFFSET * math.cos(pose[2]), pose[1] - DUMP_OFFSET * math.sin(pose[2])
                 b = self.gt["berm"]
                 inside = abs(px - b["x"]) < b["length"] / 2 and abs(py - b["y"]) < b["width"] / 2
                 self.dumps.append({"t": e["t"], "pile": [round(px, 3), round(py, 3)], "inside": inside})
+                if self.ground:
+                    back = Ground.PILE_BACK
+                    self.ground.pile(pose[0] - back * math.cos(pose[2]), pose[1] - back * math.sin(pose[2]), self.liters)
 
     def tick(self):
         # Subscribe raw to MCC topics as they appear, to count the bytes the link would carry
@@ -206,7 +264,7 @@ def run_one(seed, a, outdir):
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     time.sleep(3)
     gt = json.load(open(os.path.expanduser(f"~/.ros/lunabot_sim/arena_{seed}/ground_truth.json")))
-    mon = Monitor(gt)
+    mon = Monitor(gt, liters=None if a.no_ground_edits else a.liters_per_dump)
     t_end = time.monotonic() + a.wall_timeout
     try:
         while time.monotonic() < t_end:
@@ -257,6 +315,7 @@ def main():
     ap.add_argument("--liters-per-dump", type=float, default=8.0, help="ASSUMPTION: regolith per bucket load")
     ap.add_argument("--test-odom", action="store_true",
                     help="TEST ONLY: physics-engine odometry instead of Point-LIO (results are labelled)")
+    ap.add_argument("--no-ground-edits", action="store_true", help="don't dig pits / dump piles into the sim ground")
     ap.add_argument("--monitor", action="store_true")
     ap.add_argument("--seed", type=int, default=0, help="--monitor: seed of the running sim")
     a = ap.parse_args()

@@ -33,6 +33,12 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 # Rulebook geometry (arena frame: origin at the starting-zone corner, X along the 6.88 m length)
 ARENA = (6.88, 5.0)
+ACTION_CLIENTS = {  # BasicNavigator attribute -> (type, name), for reset_client()
+    "nav_to_pose_client": (NavigateToPose, "navigate_to_pose"),
+    "compute_path_to_pose_client": (ComputePathToPose, "compute_path_to_pose"),
+    "spin_client": (Spin, "spin"), "backup_client": (BackUp, "backup"),
+    "drive_on_heading_client": (DriveOnHeading, "drive_on_heading"),
+}
 EXCAVATION_X = 2.5
 BERM = (5.38, 0.9, 2.2, 0.9)   # centre x, y, length (x), width (y)
 FRONT, REAR, HALF_W = 0.6, 0.45, 0.41   # footprint about base_link (nav2 params; rear = fisheye mast)
@@ -75,6 +81,7 @@ class MissionExecutive(BasicNavigator):
             "dump_reverse_options": [0.6, 0.3, 0.0],  # final straight reverse into the dump pose (Nav2 BackUp);
                                            # shorter when rocks block the longer approach
             "dump_server_reverse": 0.0,    # distance the depositing server itself reverses (real: measure)
+            "post_dump_forward": 0.4,      # pull away from the fresh pile: it's in the lidar's blind zone, unmapped
             "dump_slots": [4.68, 5.38, 6.08],  # x of each dump along the 2.2 m berm box
             "lane_ys": [0.7, 1.3, 1.9, 2.5, 3.1, 3.7, 4.3],
             "lane_headings": [0.0, 0.785, -0.785],
@@ -214,9 +221,8 @@ class MissionExecutive(BasicNavigator):
         handle = None
         if self.nav_to_pose_client.wait_for_server(timeout_sec=5.0):
             handle = self.send_goal(self.nav_to_pose_client, NavigateToPose.Goal(pose=pose))
-        if handle is None:   # see plan(): recreate the client for fresh discovery
-            self.nav_to_pose_client.destroy()
-            self.nav_to_pose_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        if handle is None:
+            self.reset_client("nav_to_pose_client", "goal not accepted")
             return False
         self.goal_handle, self.result_future = handle, handle.get_result_async()
         return True
@@ -232,7 +238,7 @@ class MissionExecutive(BasicNavigator):
         if self.compute_path_to_pose_client.wait_for_server(timeout_sec=5.0):
             handle = self.send_goal(self.compute_path_to_pose_client, g)
         if handle is None:
-            self.reset_planner_client("goal not accepted")
+            self.reset_client("compute_path_to_pose_client", "goal not accepted")
             return None
         r = handle.get_result_async()
         rclpy.spin_until_future_complete(self, r, timeout_sec=timeout)
@@ -240,20 +246,21 @@ class MissionExecutive(BasicNavigator):
             handle.cancel_goal_async()
             # The planner logged "Failed to send result response (timeout)": the reply side of this client
             # never matched, so every later result is lost too. Same cure as an unanswered goal.
-            self.reset_planner_client("no result")
+            self.reset_client("compute_path_to_pose_client", "no result")
             return None
         res = r.result()
         return res.result.path if res.status == GoalStatus.STATUS_SUCCEEDED else None
 
-    def reset_planner_client(self, why):
-        """Seen in the sim (Fast DDS, ~40 nodes on one laptop): this process's action client never matched
-        the planner (goal or result side) while a fresh client planned fine. A new entity gets fresh
-        discovery; give it a moment before first use."""
-        self.compute_path_to_pose_client.destroy()
-        self.compute_path_to_pose_client = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
-        self.compute_path_to_pose_client.wait_for_server(timeout_sec=5.0)
+    def reset_client(self, attr, why):
+        """Seen in the sim (Fast DDS, ~40 nodes on one laptop): an action client of this process never matched
+        its server (goal or result side; planner, then the spin/backup behaviors) while a fresh client worked.
+        A new entity gets fresh discovery; give it a moment before first use."""
+        kind, name = ACTION_CLIENTS[attr]
+        getattr(self, attr).destroy()
+        setattr(self, attr, ActionClient(self, kind, name))
+        getattr(self, attr).wait_for_server(timeout_sec=5.0)
         self.spin_wait(2.0)
-        self.event(f"planner {why}; recreated the ComputePathToPose client")
+        self.event(f"{name} {why}; recreated the action client")
 
     def plan_cost(self, start, goal):
         """Cost-to-go of a leg from Nav2's own planner (same costmap and planner the robot will drive)."""
@@ -382,8 +389,10 @@ class MissionExecutive(BasicNavigator):
                     moved = math.hypot(track[-1][1][0] - track[0][1][0], track[-1][1][1] - track[0][1][1])
                     turned = abs(wrap(track[-1][1][2] - track[0][1][2]))
                     if moved < 0.05 and turned < 0.1:
-                        self.event(f"STUCK on {desc}: commanded motion, measured {moved:.2f} m; backing off")
                         self.cancelTask()
+                        if self.finish_heading(goal, desc):  # stalled at the goal on its last turn
+                            return True
+                        self.event(f"STUCK on {desc}: commanded motion, measured {moved:.2f} m; backing off")
                         self.recover(self.last_cmd[0])
                         break
             else:
@@ -396,7 +405,7 @@ class MissionExecutive(BasicNavigator):
         """At the goal position but not its heading: Pure Pursuit asks the skid steer for a turn so slow it
         doesn't move, and stuck detection fires. Finish with an explicit Nav2 spin instead."""
         pose = self.pose_now(2.0)
-        if pose is None or math.hypot(goal[0] - pose[0], goal[1] - pose[1]) > 0.35:
+        if pose is None or math.hypot(goal[0] - pose[0], goal[1] - pose[1]) > 0.25:
             return False
         delta = wrap(goal[2] - pose[2])
         if abs(delta) > 0.2:
@@ -468,23 +477,25 @@ class MissionExecutive(BasicNavigator):
     def behavior(self, kind, amount, speed=0.1, allowance=20):
         """Nav2 Spin / BackUp / DriveOnHeading with bounded waits (BasicNavigator's wait forever for the
         goal response; one that never came hung the mission). True if it succeeded."""
-        client, goal = {
-            "spin": (self.spin_client, Spin.Goal(target_yaw=float(amount))),
-            "backup": (self.backup_client, BackUp.Goal(target=Point(x=float(amount)), speed=float(speed))),
-            "drive": (self.drive_on_heading_client, DriveOnHeading.Goal(target=Point(x=float(amount)), speed=float(speed))),
+        attr, goal = {
+            "spin": ("spin_client", Spin.Goal(target_yaw=float(amount))),
+            "backup": ("backup_client", BackUp.Goal(target=Point(x=float(amount)), speed=float(speed))),
+            "drive": ("drive_on_heading_client", DriveOnHeading.Goal(target=Point(x=float(amount)), speed=float(speed))),
         }[kind]
         goal.time_allowance = DurationMsg(sec=int(allowance))
-        if not client.wait_for_server(timeout_sec=5.0):
-            return False
-        handle = self.send_goal(client, goal)
-        if handle is None:
-            return False
-        r = handle.get_result_async()
-        rclpy.spin_until_future_complete(self, r, timeout_sec=allowance + 10.0)
-        if not r.done():
+        for _ in range(2):   # once more on a fresh client
+            client = getattr(self, attr)
+            handle = self.send_goal(client, goal) if client.wait_for_server(timeout_sec=5.0) else None
+            if handle is None:
+                self.reset_client(attr, "goal not accepted")
+                continue
+            r = handle.get_result_async()
+            rclpy.spin_until_future_complete(self, r, timeout_sec=allowance + 10.0)
+            if r.done():
+                return r.result().status == GoalStatus.STATUS_SUCCEEDED
             handle.cancel_goal_async()
-            return False
-        return r.result().status == GoalStatus.STATUS_SUCCEEDED
+            self.reset_client(attr, "no result")
+        return False
 
     def excavate_here(self):
         self.phase = "EXCAVATE"
@@ -563,6 +574,8 @@ class MissionExecutive(BasicNavigator):
                        pile=pose and [round(pose[0] - self.p["dump_offset"] * math.cos(pose[2]), 3),
                                       round(pose[1] - self.p["dump_offset"] * math.sin(pose[2]), 3)])
             loaded = False
+            if ok:
+                self.behavior("drive", self.p["post_dump_forward"], allowance=10)
             if not self.check_clock():
                 break
             # Travel empty: back to the excavation zone completes the cycle (16.5.3)
