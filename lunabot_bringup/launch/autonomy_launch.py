@@ -27,6 +27,7 @@ def generate_launch_description():
         DeclareLaunchArgument("planner_id", default_value="HybridRS"),
         DeclareLaunchArgument("max_cycles", default_value="0"),
         DeclareLaunchArgument("run_duration", default_value="900.0"),
+        DeclareLaunchArgument("controller_id", default_value=""),
         Node(
             package="apriltag_ros", executable="apriltag_node", name="apriltag",
             parameters=[os.path.join(config_dir, "params", "apriltag", "fisheye_36h11.yaml"), sim_time],
@@ -45,7 +46,8 @@ def generate_launch_description():
             package="lunabot_nav", executable="mission_executive.py", name="mission_executive", output="screen",
             parameters=[sim_time, {"planner_id": ParameterValue(LaunchConfiguration("planner_id"), value_type=str),
                                    "max_cycles": ParameterValue(LaunchConfiguration("max_cycles"), value_type=int),
-                                   "run_duration": ParameterValue(LaunchConfiguration("run_duration"), value_type=float)}],
+                                   "run_duration": ParameterValue(LaunchConfiguration("run_duration"), value_type=float),
+                                   "controller_id": ParameterValue(LaunchConfiguration("controller_id"), value_type=str)}],
             condition=IfCondition(LaunchConfiguration("start_mission")),
         ),
     ])

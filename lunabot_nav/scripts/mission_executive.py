@@ -68,6 +68,7 @@ class MissionExecutive(BasicNavigator):
             "start_deadline": 300.0,       # must initiate a mission cycle within 5 min (15.3.1)
             "max_cycles": 0,               # 0 = until time runs out
             "planner_id": "HybridRS",      # see AUTONOMY.md, planner benchmark
+            "controller_id": "",           # '' = BT default (PurePursuit); "MPPI" also handles reversing + turns
             "excavation_distance": 0.6,    # straight pass the excavation server drives (sim: 3 s @ 0.2 m/s)
             "excavate_time": 10.0, "dump_time": 15.0, "travel_loaded_time": 90.0,  # leg-time priors; replaced by measured means
             "dump_offset": 0.45,           # pile centre behind base_link when the bucket tips (rear dump)
@@ -81,6 +82,7 @@ class MissionExecutive(BasicNavigator):
             "reverse_weight": 3.0,         # extra cost per metre reversed (limited rear sensing)
             "candidates_to_plan": 4,
             "stuck_time": 6.0, "localize_timeout": 40.0, "nav_retries": 3,
+            "leg_timeout": 180.0,          # wall seconds for one NavigateToPose attempt
             "log_dir": os.path.expanduser("~/.ros/lunabot_mission"),
         }
         for k, v in params.items():
@@ -94,6 +96,7 @@ class MissionExecutive(BasicNavigator):
         self.state_pub = self.create_publisher(String, "/mission/state", 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.planner_pub = self.create_publisher(String, "planner_selector", latched)
+        self.controller_pub = self.create_publisher(String, "controller_selector", latched)
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.relocalize_pub = self.create_publisher(String, "/arena_localizer/request", 10)
         self.create_subscription(Empty, "/mission/inhibit", lambda _: self.inhibit("MCC inhibit command"), 10)
@@ -229,19 +232,28 @@ class MissionExecutive(BasicNavigator):
         if self.compute_path_to_pose_client.wait_for_server(timeout_sec=5.0):
             handle = self.send_goal(self.compute_path_to_pose_client, g)
         if handle is None:
-            # Seen in the sim: this process's client never matched the planner's action server (a fresh
-            # client in another process planned fine). A new client entity gets fresh discovery.
-            self.compute_path_to_pose_client.destroy()
-            self.compute_path_to_pose_client = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
-            self.event("planner unreachable; recreated the ComputePathToPose client")
+            self.reset_planner_client("goal not accepted")
             return None
         r = handle.get_result_async()
         rclpy.spin_until_future_complete(self, r, timeout_sec=timeout)
         if not r.done():
             handle.cancel_goal_async()
+            # The planner logged "Failed to send result response (timeout)": the reply side of this client
+            # never matched, so every later result is lost too. Same cure as an unanswered goal.
+            self.reset_planner_client("no result")
             return None
         res = r.result()
         return res.result.path if res.status == GoalStatus.STATUS_SUCCEEDED else None
+
+    def reset_planner_client(self, why):
+        """Seen in the sim (Fast DDS, ~40 nodes on one laptop): this process's action client never matched
+        the planner (goal or result side) while a fresh client planned fine. A new entity gets fresh
+        discovery; give it a moment before first use."""
+        self.compute_path_to_pose_client.destroy()
+        self.compute_path_to_pose_client = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
+        self.compute_path_to_pose_client.wait_for_server(timeout_sec=5.0)
+        self.spin_wait(2.0)
+        self.event(f"planner {why}; recreated the ComputePathToPose client")
 
     def plan_cost(self, start, goal):
         """Cost-to-go of a leg from Nav2's own planner (same costmap and planner the robot will drive)."""
@@ -330,6 +342,8 @@ class MissionExecutive(BasicNavigator):
             c1, t1 = self.plan_cost(start, lane)
             c2, t2 = self.plan_cost(end, target)
             plan_s += t1 + t2
+            if c2 == math.inf:  # that slot's approach is blocked; choose_dump picks another later
+                c2 = 2 * math.hypot(target[0] - end[0], target[1] - end[1])
             if best is None or c1 + c2 < best[0]:
                 best = (c1 + c2, lane)
         self.event(f"lane chosen {tuple(round(v, 2) for v in best[1])} cost {best[0]:.2f} (planning {plan_s:.1f} s)")
@@ -350,7 +364,12 @@ class MissionExecutive(BasicNavigator):
                 self.event(f"{desc}: NavigateToPose not accepted, retry {attempt + 1}")
                 continue
             track = []
+            leg_end = time.monotonic() + self.p["leg_timeout"]
             while not self.isTaskComplete():
+                if time.monotonic() > leg_end:   # result lost or Nav2 wedged: don't wait forever
+                    self.event(f"{desc}: no Nav2 result in {self.p['leg_timeout']:.0f} s; cancelling")
+                    self.cancelTask()
+                    break
                 if not self.check_clock():
                     return False
                 now = self.get_clock().now()
@@ -371,7 +390,20 @@ class MissionExecutive(BasicNavigator):
                 if self.getResult() == TaskResult.SUCCEEDED:
                     return True
                 self.event(f"{desc}: Nav2 {self.getResult().name} ({self.getTaskError()[1] if hasattr(self, 'getTaskError') else ''}), retry {attempt + 1}")
-        return False
+        return self.finish_heading(goal, desc)
+
+    def finish_heading(self, goal, desc):
+        """At the goal position but not its heading: Pure Pursuit asks the skid steer for a turn so slow it
+        doesn't move, and stuck detection fires. Finish with an explicit Nav2 spin instead."""
+        pose = self.pose_now(2.0)
+        if pose is None or math.hypot(goal[0] - pose[0], goal[1] - pose[1]) > 0.35:
+            return False
+        delta = wrap(goal[2] - pose[2])
+        if abs(delta) > 0.2:
+            self.event(f"{desc}: at the position, turning {math.degrees(delta):.0f} deg to the goal heading")
+            self.behavior("spin", delta, allowance=30)
+            pose = self.pose_now(2.0)
+        return pose is not None and abs(wrap(goal[2] - pose[2])) <= 0.2
 
     def recover(self, last_v):
         """Move 0.3 m away from whatever stopped us (opposite to the last commanded direction), then replan."""
@@ -466,6 +498,8 @@ class MissionExecutive(BasicNavigator):
         self.waitUntilNav2Active(localizer="robot_localization")  # no AMCL; RTAB-Map/Point-LIO localize
         if self.p["planner_id"]:
             self.planner_pub.publish(String(data=self.p["planner_id"]))
+        if self.p["controller_id"]:
+            self.controller_pub.publish(String(data=self.p["controller_id"]))
         self.t0 = self.get_clock().now()
         self.event("mission start (hands-free from the starting zone)")
         if not self.wait_localized():

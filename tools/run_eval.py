@@ -201,7 +201,8 @@ def run_one(seed, a, outdir):
            "ros2", "launch", "lunabot_bringup", "sim_autonomy_launch.py", f"seed:={seed}", "random_start:=true",
            f"max_cycles:={a.max_cycles}", f"run_duration:={a.run_duration}",
            f"test_odom:={'true' if a.test_odom else 'false'}"] + \
-          ([f"planner_id:={a.planner}"] if a.planner else [])
+          ([f"planner_id:={a.planner}"] if a.planner else []) + \
+          ([f"controller_id:={a.controller}"] if a.controller else [])
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     time.sleep(3)
     gt = json.load(open(os.path.expanduser(f"~/.ros/lunabot_sim/arena_{seed}/ground_truth.json")))
@@ -249,6 +250,7 @@ def main():
     ap.add_argument("--seeds", default="1-3")
     ap.add_argument("--tag", default="eval")
     ap.add_argument("--planner", default="")
+    ap.add_argument("--controller", default="")
     ap.add_argument("--max-cycles", type=int, default=0)
     ap.add_argument("--run-duration", type=float, default=900.0, help="mission run clock (sim seconds)")
     ap.add_argument("--wall-timeout", type=float, default=3600.0)

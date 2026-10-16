@@ -33,6 +33,7 @@ def generate_launch_description():
         DeclareLaunchArgument("planner_id", default_value="HybridRS"),
         DeclareLaunchArgument("max_cycles", default_value="0"),
         DeclareLaunchArgument("run_duration", default_value="900.0"),
+        DeclareLaunchArgument("controller_id", default_value=""),
         include("gui_launch.py", 0, use_sim="true", arena_type="artemis2027", seed=lc("seed"),
                 random_start=lc("random_start"), robot_heading=lc("robot_heading"), sim_gui=lc("sim_gui"),
                 sim_rtf=lc("sim_rtf"), sim_test_odom=lc("test_odom"),
@@ -41,5 +42,6 @@ def generate_launch_description():
         include("mapping_launch.py", 30, use_sim="true"),
         include("nav2_stack_launch.py", 40, use_sim="true"),
         include("autonomy_launch.py", 45, use_sim="true", start_mission=lc("start_mission"),
-                planner_id=lc("planner_id"), max_cycles=lc("max_cycles"), run_duration=lc("run_duration")),
+                planner_id=lc("planner_id"), max_cycles=lc("max_cycles"), run_duration=lc("run_duration"),
+                controller_id=lc("controller_id")),
     ])
