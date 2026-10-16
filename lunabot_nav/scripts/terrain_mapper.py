@@ -47,10 +47,12 @@ def tf_matrix(t):
     return M
 
 
-def classify_scan(ij, z, n, rock_h, crater_d, window):
+def classify_scan(ij, z, n, rock_h, crater_d, window, floor_z, band):
     """Per-scan cell classes from points in grid cells ij (N x 2) with heights z: (high, low, ground) n x n masks.
-    Heights are judged against the local ground: the mean of the cells' lowest returns within `window` cells,
-    computed twice so rocks and craters don't bias their own reference."""
+    Heights are judged against the local ground: the mean lowest return of the cells within `window` cells that
+    could be floor (all returns within `band` of the robot's own floor height `floor_z`), computed twice so
+    rocks and craters don't bias their own reference. Without the band, duct and wall cells near a wall, where
+    the floor itself is barely seen, lifted the reference until real floor read as crater."""
     flat = ij[:, 0] * n + ij[:, 1]
     zmin = np.full(n * n, np.inf)
     zmax = np.full(n * n, -np.inf)
@@ -58,15 +60,16 @@ def classify_scan(ij, z, n, rock_h, crater_d, window):
     np.maximum.at(zmax, flat, z)
     zmin, zmax = zmin.reshape(n, n), zmax.reshape(n, n)
     seen = np.isfinite(zmin)
-    use = seen
+    floor = seen & (zmax < floor_z + band) & (zmin > floor_z - band)
+    use = floor
     for _ in range(2):
-        w = use.astype(np.float32)
+        w = cv2.boxFilter(use.astype(np.float32), -1, (window, window), normalize=False)
         total = cv2.boxFilter(np.where(use, zmin, 0).astype(np.float32), -1, (window, window), normalize=False)
-        ground = total / np.maximum(cv2.boxFilter(w, -1, (window, window), normalize=False), 1)
+        ground = np.where(w > 0, total / np.maximum(w, 1), floor_z)   # no floor in view: the robot's own level
         hi = seen & (zmax - ground > rock_h)
         lo = seen & (zmin - ground < -crater_d)
-        use = seen & ~hi & ~lo
-    return hi, lo, use & (np.abs(zmin - ground) < 0.05)
+        use = floor & ~hi & ~lo
+    return hi, lo, seen & ~hi & ~lo & (np.abs(zmin - ground) < 0.05)
 
 
 def tilt(q):
@@ -93,6 +96,10 @@ class TerrainMapper(Node):
             "crater_margin": 0.20,       # a wheel in a crater is a penalty and may end the run
             "max_rock_radius": 0.35,     # blobs larger than this (walls, column) get no hard margin
             "ground_window": 1.0,        # local ground reference (m): several crater widths, < a typical dug pit
+            # cells within this of the robot's own floor height may serve as ground reference. Captured sim scans
+            # 2-3 m from a wall: false crater cells 64 (no band) -> 17 (0.3) -> 14 (0.25).
+            # ponytail: also the deepest pit the robot can stand in before its rim reads as rock; raise if ours get deeper
+            "floor_band": 0.3,
             # arena-frame rects [xmin, ymin, xmax, ymax, ...] where depressions aren't craters: the excavation
             # zone (x < 2.5, incl. the starting zone) and the construction zone (11.1, Figure 9)
             "dig_zones": [-1.0, -1.0, 2.5, 6.0, 3.88, -1.0, 7.9, 1.5],
@@ -108,6 +115,7 @@ class TerrainMapper(Node):
         self.ground_offset, self.unknown = g("ground_offset"), g("unknown_value")
         self.max_rock_radius = g("max_rock_radius")
         self.window = 2 * int(g("ground_window") / self.res / 2) + 1
+        self.floor_band = g("floor_band")
         self.dig_zones = np.array(g("dig_zones")).reshape(-1, 4)
         self.arena = g("arena_frame")
         self.n = int(g("size") / self.res)
@@ -151,7 +159,7 @@ class TerrainMapper(Node):
         pts = pts[keep]
         ij = ((pts[:, :2] - self.origin) / self.res).astype(int)
         ok = (ij >= 0).all(1) & (ij < self.n).all(1)
-        hi, lo, gr = classify_scan(ij[ok], pts[ok, 2], self.n, self.rock_h, self.crater_d, self.window)
+        hi, lo, gr = classify_scan(ij[ok], pts[ok, 2], self.n, self.rock_h, self.crater_d, self.window, ground_z, self.floor_band)
         # Per-scan evidence, capped so later views can overturn earlier ones
         for acc, f in ((self.high, hi), (self.low, lo), (self.ground, gr)):
             acc[f] = np.minimum(acc[f] + 1, 20)

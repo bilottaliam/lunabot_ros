@@ -65,7 +65,7 @@ Every number has a physical reason; nothing is tuned to a sim artifact.
 
 | Quantity | Value | Reason |
 |---|---|---|
-| Ground reference | local: mean of each cell's lowest return within 1.0 m (two passes, rocks/craters excluded), in the gravity-aligned frame | D11. A robot in its own pit would see the ground around it as rock against its own height. Independent of odom z drift. 1.0 m is several crater widths, so a crater can't be its own reference. |
+| Ground reference | local: mean of each cell's lowest return within 1.0 m (two passes, rocks/craters excluded), counting only cells within ±0.3 m of the robot's own floor height, in the gravity-aligned frame | D11. A robot in its own pit would see the ground around it as rock against its own height. 1.0 m is several crater widths, so a crater can't be its own reference. The ±0.3 m band keeps duct and wall cells out of the reference near walls, where the floor itself is barely seen. It also sets the deepest pit the robot can stand in (`floor_band`). |
 | Rock threshold | > 0.10 m above ground, ≥ 2 scans, more high than ground evidence | Boulders are 30–40 cm across with varying heights; lidar noise ~2 cm, raked undulation ~±2 cm. 10 cm is under the robot's ~0.1 m wheel-radius clearance. |
 | Crater threshold | > 0.10 m below ground, same evidence rule, **obstacle zone only** | Craters are 40–50 cm wide and deep. Grazing rays only see the far wall: at ~2 m and beyond, a crater shows as unknown (shadow) before it shows as deep. In the excavation/construction zones depressions are our own pits (D11). |
 | Unknown cells | value 25 → Nav2 cost ~63 (non-trinary) | "Driving near unknown space" costs extra, so plans go through observed ground where they can. |
@@ -93,6 +93,19 @@ leads to: `length + 0.5 m/rad × heading change + 3.0 × reversed length`. Then:
   the long approach (seed 2 in the benchmark puts boulders on two of them).
 - *Exits*: the cost-to-go weights turns and reversing, and the planner itself penalizes direction changes. So 180° turns in
   tight spaces lose to arcs through open space whenever one exists.
+
+**Detection vs ground truth** (seed 1, 30 captured scans from the dump pose 2–3 m from the north/east walls,
+cells > 0.1 m from any true obstacle and inside the arena, ignoring walls and the column):
+
+| Ground reference | False crater cells | False rock cells | Craters found | Boulders found |
+|---|---|---|---|---|
+| robot's own height (before D11) | 85 | 213 | 2/4 | 4/4 |
+| local mean, no floor band | 64 | 13 | 4/4* | 3/4 |
+| **local mean, ±0.3 m floor band** | **17** | **13** | 3/4 | 3/4 |
+| local mean, ±0.25 m floor band | 14 | 13 | 3/4 | 3/4 |
+
+\* The no-band variant "found" the 4th crater only through the same upward bias near the wall; it was never observed as
+deep. The remaining false craters sit within 0.7 m of the north wall. The missed boulder is out of view from that pose.
 
 ## Planner choice and benchmark
 

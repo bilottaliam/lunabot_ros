@@ -89,8 +89,8 @@ def test_path_metrics():
 
 
 def test_terrain_classify():
-    """Crater and boulder found against the local ground; a wide dug pit's floor is not a crater, and the
-    result doesn't depend on the absolute height (robot standing in a pit, odom z drift)."""
+    """Crater and boulder found against the local ground; a wide dug pit's floor is not a crater, the result
+    doesn't depend on the absolute height (odom z drift), and a robot standing in its pit doesn't see rock around it."""
     res, n = 0.05, 120
     c = (np.arange(n) + 0.5) * res
     X, Y = np.meshgrid(c, c, indexing="ij")
@@ -102,7 +102,7 @@ def test_terrain_classify():
     Z -= 0.15 * np.clip(1 + inside * math.tan(math.radians(35)) / 0.15, 0, 1)
     ij = np.stack([np.repeat(np.arange(n), n), np.tile(np.arange(n), n)], 1)
     cell = lambda x, y: (int(x / res), int(y / res))
-    out = [classify_scan(ij, Z.ravel() + z0, n, 0.10, 0.10, 21) for z0 in (0.0, -0.4, 0.3)]
+    out = [classify_scan(ij, Z.ravel() + z0, n, 0.10, 0.10, 21, z0, 0.3) for z0 in (0.0, -0.4, 0.3)]
     hi, lo, gr = out[0]
     assert lo[cell(1.5, 1.5)] and not hi[cell(1.5, 1.5)]
     assert hi[cell(4.5, 1.5)]
@@ -110,6 +110,8 @@ def test_terrain_classify():
     assert gr[cell(1.0, 4.0)] and not (hi | lo)[cell(1.0, 4.0)]
     for o in out[1:]:
         assert all((a == b).all() for a, b in zip(o, out[0]))
+    hi, lo, gr = classify_scan(ij, Z.ravel(), n, 0.10, 0.10, 21, -0.15, 0.3)   # robot standing in the pit
+    assert not (hi | lo)[cell(4.0, 4.2)] and not hi[cell(1.0, 4.0)] and lo[cell(1.5, 1.5)] and hi[cell(4.5, 1.5)]
 
 
 if __name__ == "__main__":

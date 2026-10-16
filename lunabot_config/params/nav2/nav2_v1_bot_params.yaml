@@ -56,7 +56,7 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
       time_steps: 56
       model_dt: 0.05
-      batch_size: 2000
+      batch_size: 1000   # CPU: the sim laptop runs the whole stack
       vx_std: 0.2
       vy_std: 0.2
       wz_std: 0.4
@@ -66,7 +66,7 @@ controller_server:
       wz_max: 1.0
       iteration_count: 1
       prune_distance: 1.7
-      transform_tolerance: 0.1
+      transform_tolerance: 1.0   # sim TF lags up to ~1 s (same as PurePursuit)
       temperature: 0.3
       gamma: 0.015
       motion_model: "DiffDrive"
@@ -102,12 +102,12 @@ controller_server:
         cost_power: 1
         repulsion_weight: 1.5
         critical_weight: 20.0
-        consider_footprint: false
+        consider_footprint: true   # 1.05 x 0.82 m rectangle, not a circle
         collision_cost: 10000.0
         collision_margin_distance: 0.1
         near_goal_distance: 0.5
-        inflation_radius: 0.55
-        cost_scaling_factor: 10.0
+        inflation_radius: 0.8      # must match the costmap inflation layer
+        cost_scaling_factor: 5.0
       PathAlignCritic:
         enabled: true
         cost_power: 1
